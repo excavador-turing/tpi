@@ -113,10 +113,8 @@ impl Prompt {
                 }
             }
             KeyCode::Left => self.left(),
-            KeyCode::Right => {
-                if self.cursor_idx < self.input.len() - 1 {
-                    self.cursor_idx += 1;
-                }
+            KeyCode::Right if self.cursor_idx < self.input.len() - 1 => {
+                self.cursor_idx += 1;
             }
             _ => {}
         }
