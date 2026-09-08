@@ -113,13 +113,25 @@ impl Prompt {
                 }
             }
             KeyCode::Left => self.left(),
-            KeyCode::Right if self.cursor_idx < self.input.len() - 1 => {
+            KeyCode::Right if self.can_move_right() => {
                 self.cursor_idx += 1;
             }
             _ => {}
         }
 
         Ok(true)
+    }
+
+    /// Whether the cursor has somewhere to the right to go.
+    ///
+    /// This was `cursor_idx < input.len() - 1`, which underflows on an
+    /// empty prompt: `0usize - 1` panics in debug and wraps to usize::MAX
+    /// in release, so Right moved the cursor past the end and the next
+    /// character typed panicked inside `String::insert`. Adding to the left
+    /// side instead of subtracting from the right keeps the same answer for
+    /// every non-empty input and is defined for the empty one.
+    fn can_move_right(&self) -> bool {
+        self.cursor_idx + 1 < self.input.len()
     }
 
     fn left(&mut self) {
@@ -141,4 +153,47 @@ pub fn simple(msg: &'static str) -> Result<String> {
 
 pub fn password(msg: &'static str) -> Result<String> {
     Prompt::new(msg, true).read()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Prompt;
+
+    fn at(input: &str, cursor_idx: usize) -> Prompt {
+        Prompt {
+            msg: "",
+            password: false,
+            input: input.to_string(),
+            cursor_idx,
+        }
+    }
+
+    /// The bug: `len() - 1` on an empty String. In debug this panicked; in
+    /// release it wrapped to usize::MAX, every comparison passed, and the
+    /// cursor walked off the end until `String::insert` panicked instead.
+    #[test]
+    fn an_empty_prompt_has_nowhere_to_move_right() {
+        assert!(!at("", 0).can_move_right());
+    }
+
+    #[test]
+    fn a_single_character_has_nowhere_to_move_right() {
+        assert!(!at("x", 0).can_move_right());
+    }
+
+    /// Everything non-empty must answer exactly as `cursor_idx < len - 1`
+    /// did, or this is a behaviour change wearing a bug fix's clothes.
+    #[test]
+    fn non_empty_input_answers_as_the_old_expression_did() {
+        for text in ["a", "ab", "abcdef"] {
+            for cursor_idx in 0..=text.len() {
+                let old = cursor_idx < text.len() - 1;
+                assert_eq!(
+                    at(text, cursor_idx).can_move_right(),
+                    old,
+                    "{text:?} at {cursor_idx}"
+                );
+            }
+        }
+    }
 }
