@@ -13,6 +13,8 @@
 // limitations under the License.
 
 mod cli;
+mod fork;
+mod fork_cmd;
 mod legacy_handler;
 mod prompt;
 mod request;
@@ -36,19 +38,22 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    if let Err(e) = execute_cli_command(&cli).await {
-        if let Some(error) = e.downcast_ref::<reqwest::Error>() {
-            println!("{error}");
-        } else {
-            println!("{:#}", e);
+    match execute_cli_command(&cli).await {
+        Ok(code) => ExitCode::from(code),
+        Err(e) => {
+            // stderr, not stdout: an error printed to stdout is swallowed by
+            // `tpi --json ... | jq` and shows up as a parse failure instead.
+            if let Some(error) = e.downcast_ref::<reqwest::Error>() {
+                eprintln!("{error}");
+            } else {
+                eprintln!("{:#}", e);
+            }
+            ExitCode::FAILURE
         }
-        return ExitCode::FAILURE;
     }
-
-    ExitCode::SUCCESS
 }
 
-async fn execute_cli_command(cli: &Cli) -> anyhow::Result<()> {
+async fn execute_cli_command(cli: &Cli) -> anyhow::Result<u8> {
     let command = cli.command.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "subcommand must be specified!\n\n{}",
