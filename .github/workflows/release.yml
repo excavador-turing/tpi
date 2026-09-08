@@ -1,8 +1,19 @@
 name: Build and Release Pipeline
+# A TAG is the release act, matching bmcd and BMC-UI. Upstream built a
+# release on every push to master, which makes "released" mean "merged" --
+# and after the default branch became `hive`, it meant nothing at all: the
+# workflow could no longer fire, so v1.1.0 was tagged and produced no
+# binaries.
 on:
   push:
-    branches:
-      - master
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Never cancel a release in flight: the tag is already public by the time
+# this starts.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build-pipeline:
