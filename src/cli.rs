@@ -107,6 +107,16 @@ pub enum Commands {
     #[command(arg_required_else_help = true, hide = true)]
     Eeprom(EepromArgs),
 
+    /// Firmware, bmcd, kernel and board identity
+    About,
+
+    /// Board temperatures
+    Thermal,
+
+    /// The read-only credential the metrics endpoint accepts
+    #[command(arg_required_else_help = true)]
+    Metrics(MetricsArgs),
+
     /// Print turing-pi info
     Info,
 
@@ -220,12 +230,134 @@ pub struct UsbArgs {
 
 #[derive(Args, Clone)]
 pub struct FirmwareArgs {
+    #[command(subcommand)]
+    pub cmd: Option<FirmwareCmd>,
+
+    /// Deprecated: `tpi firmware --file X` still works and means
+    /// `tpi firmware upload --file X`. Kept because it is the documented
+    /// upstream spelling and is already in people's scripts.
     #[arg(short, long)]
-    pub file: PathBuf,
+    pub file: Option<PathBuf>,
     /// A sha256 checksum will be used by the BMC to verify the integrity
     /// of the input, in this case, the received OS image.
     #[arg(long)]
     pub sha256: Option<String>,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum FirmwareCmd {
+    /// Upload an image from this machine and stage it
+    Upload(UploadArgs),
+
+    /// List the versions this board could install, across every source
+    List(ListArgs),
+
+    /// Install a version from the listing
+    #[command(arg_required_else_help = true)]
+    Install(InstallArgs),
+
+    /// Ask whether a newer release exists.
+    ///
+    /// Exits 10 when one does, so `tpi firmware check || notify` works in
+    /// cron without parsing output.
+    Check,
+
+    /// Where this board looks for firmware
+    Sources(SourcesArgs),
+}
+
+#[derive(Args, Clone)]
+pub struct UploadArgs {
+    #[arg(short, long)]
+    pub file: PathBuf,
+    #[arg(long)]
+    pub sha256: Option<String>,
+}
+
+#[derive(Args, Clone)]
+pub struct ListArgs {
+    /// Re-poll the sources instead of using the board's cached answer.
+    #[arg(long)]
+    pub refresh: bool,
+    /// Include versions that are older than, or unrelated to, the running
+    /// one. The default listing is what you could move TO.
+    #[arg(short, long)]
+    pub all: bool,
+}
+
+#[derive(Args, Clone)]
+pub struct InstallArgs {
+    /// A version from `tpi firmware list`, e.g. v2.8.0
+    pub version: String,
+    /// Which source to take it from. Only needed when more than one offers
+    /// the same version.
+    #[arg(short, long)]
+    pub source: Option<String>,
+    /// Replace an update that is already staged for the next boot.
+    #[arg(long)]
+    pub force: bool,
+    /// Do not ask for confirmation.
+    #[arg(short, long)]
+    pub yes: bool,
+}
+
+#[derive(Args, Clone)]
+pub struct SourcesArgs {
+    #[command(subcommand)]
+    pub cmd: SourcesCmd,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum SourcesCmd {
+    /// Show the configured sources
+    List,
+    /// Add a source
+    #[command(arg_required_else_help = true)]
+    Add(SourceAddArgs),
+    /// Remove a source by id
+    #[command(arg_required_else_help = true)]
+    Remove { id: String },
+    /// Start consulting a source again
+    #[command(arg_required_else_help = true)]
+    Enable { id: String },
+    /// Stop consulting a source without deleting it
+    #[command(arg_required_else_help = true)]
+    Disable { id: String },
+}
+
+#[derive(Args, Clone)]
+pub struct SourceAddArgs {
+    /// Stable identifier. The install call refers to this, not the label,
+    /// so renaming a source later cannot change what an install means.
+    pub id: String,
+    /// `owner/repo` for github, a URL prefix for http, a path for local
+    pub location: String,
+    #[arg(short, long, value_enum, default_value_t = SourceKindArg::Github)]
+    pub kind: SourceKindArg,
+    /// What to call it in listings. Defaults to the id.
+    #[arg(short, long)]
+    pub label: Option<String>,
+}
+
+#[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKindArg {
+    Github,
+    Http,
+    Local,
+}
+
+#[derive(Args, Clone)]
+pub struct MetricsArgs {
+    #[command(subcommand)]
+    pub cmd: MetricsCmd,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum MetricsCmd {
+    /// Print the current token
+    Show,
+    /// Replace the token. Anything scraping with the old one stops.
+    Rotate,
 }
 
 #[derive(Args, Clone)]

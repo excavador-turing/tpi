@@ -1,34 +1,63 @@
 name: Tpi Validation Pipeline
-on: [push]
-jobs:
 
+# actions-rs/* was archived in 2022. Beyond being unmaintained,
+# clippy-check posts its findings as a GitHub Check, which the token here
+# cannot create -- so the job failed with "Resource not accessible by
+# integration" while clippy itself reported "0 ICE, 0 errors, 0 warnings".
+# A green build reported as red is worse than either.
+#
+# Plain `cargo` steps with -D warnings put the failure where the failure is.
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
   cargo-clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - run: rustup component add clippy
-      - uses: actions-rs/clippy-check@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # No toolchain input: rust-toolchain.toml is the single source of
+      # truth, and naming a version here would give the repo two answers --
+      # the split this fork just spent a commit closing.
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
-          token: '${{ secrets.GITHUB_TOKEN }}'
-          args: '--all-features'
+          components: clippy
+          # The action sets RUSTFLAGS='-D warnings' by default, which would
+          # apply to every cargo call in the job. The deny-warnings gate
+          # belongs on the clippy step, where it is visible.
+          rustflags: ""
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  cargo-fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          components: rustfmt
+          rustflags: ""
+      - run: cargo fmt --all --check
 
   cargo-deny:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - uses: EmbarkStudios/cargo-deny-action@v2
-      with:
-        command: check bans licenses sources
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources
 
   cargo-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
-          toolchain: stable
-          default: true
-          profile: minimal
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
+          rustflags: ""
+      - run: cargo test --all-features

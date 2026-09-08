@@ -1,0 +1,12 @@
+# Matches BMC-Firmware's buildroot/package/rust-bin and excavador-turing/bmcd.
+#
+# tpi ships twice from one source: as a buildroot package inside the
+# firmware (--features localhost,native-tls) and as release binaries for
+# five targets. CI used `stable`, so a Rust release could change what CI
+# validated without anyone touching the repo, while the on-board build used
+# 1.98.1 regardless.
+#
+# Bump together with the Buildroot toolchain, never alone.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

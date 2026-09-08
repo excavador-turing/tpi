@@ -57,6 +57,27 @@ impl Request {
         })
     }
 
+    /// A fresh GET against the same host and credentials.
+    ///
+    /// `send` consumes the request, so a command that needs more than one
+    /// round-trip -- the version gate, then the call it was gating -- builds
+    /// each from here rather than reusing one.
+    pub fn to_get(&self) -> Result<Self> {
+        let url = url_from_host(&self.host, self.ver.scheme())?;
+        let mut inner = reqwest::Request::new(Method::GET, url);
+        if let Some(ua) = self.inner.headers().get(USER_AGENT) {
+            inner.headers_mut().insert(USER_AGENT, ua.clone());
+        }
+
+        Ok(Self {
+            host: self.host.clone(),
+            ver: self.ver,
+            creds: self.creds.clone(),
+            inner,
+            multipart: None,
+        })
+    }
+
     pub fn to_post(&self) -> Result<Self> {
         let url = url_from_host(&self.host, self.ver.scheme())?;
         let inner = reqwest::Request::new(Method::POST, url);

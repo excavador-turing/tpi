@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use crate::cli::{
-    AdvancedArgs, ApiVersion, Cli, Commands, CoolingArgs, CoolingCmd, EthArgs, EthCmd,
-    FirmwareArgs, GetSet, PowerArgs, PowerCmd, UartArgs, UsbArgs,
+    AdvancedArgs, ApiVersion, Cli, Commands, CoolingArgs, CoolingCmd, EthArgs, EthCmd, FirmwareCmd,
+    GetSet, PowerArgs, PowerCmd, UartArgs, UsbArgs,
 };
 use crate::cli::{FlashArgs, UsbCmd};
+use crate::fork_cmd;
 use crate::request::Request;
 use anyhow::{bail, ensure, Context};
 use indicatif::{HumanBytes, ProgressBar, ProgressState, ProgressStyle};
@@ -92,16 +93,65 @@ impl LegacyHandler {
 
     /// Handler for CLI commands. Responses are printed to stdout and need to be formatted
     /// using the JSON format with a key `response`.
-    pub async fn handle_cmd(mut self, command: &Commands) -> anyhow::Result<()> {
+    pub async fn handle_cmd(mut self, command: &Commands) -> anyhow::Result<u8> {
+        // The fork's commands do not fit the build-one-request shape below:
+        // each opens with the version gate, and several make a second call
+        // or assemble a table. They return their own exit code.
+        match command {
+            Commands::About => {
+                return fork_cmd::about(&self.request, &self.client, self.json).await
+            }
+            Commands::Thermal => {
+                return fork_cmd::thermal(&self.request, &self.client, self.json).await
+            }
+            Commands::Metrics(args) => {
+                return fork_cmd::metrics_cmd(&self.request, &self.client, &args.cmd, self.json)
+                    .await
+            }
+            Commands::Firmware(args) => match &args.cmd {
+                Some(FirmwareCmd::List(a)) => {
+                    return fork_cmd::list(&self.request, &self.client, a, self.json).await
+                }
+                Some(FirmwareCmd::Check) => {
+                    return fork_cmd::check(&self.request, &self.client, self.json).await
+                }
+                Some(FirmwareCmd::Install(a)) => {
+                    return fork_cmd::install(&self.request, &self.client, a, self.json).await
+                }
+                Some(FirmwareCmd::Sources(a)) => {
+                    return fork_cmd::sources(&self.request, &self.client, &a.cmd, self.json).await
+                }
+                Some(FirmwareCmd::Upload(_)) | None => {}
+            },
+            _ => {}
+        }
+
         match command {
             Commands::Power(args) => self.handle_power_nodes(args)?,
             Commands::Usb(args) => self.handle_usb(args)?,
-            Commands::Firmware(args) => self.handle_firmware(args).await?,
+            Commands::Firmware(args) => match (&args.cmd, &args.file) {
+                (Some(FirmwareCmd::Upload(u)), _) => {
+                    self.handle_firmware(&u.file, u.sha256.as_deref()).await?
+                }
+                // `tpi firmware --file X` predates the subcommands and is in
+                // people's scripts; it keeps working and means `upload`.
+                (None, Some(file)) => self.handle_firmware(file, args.sha256.as_deref()).await?,
+                (None, None) => bail!(
+                    "`tpi firmware` needs a subcommand: list, check, install, sources or upload"
+                ),
+                _ => unreachable!("handled above"),
+            },
             Commands::Flash(args) => self.handle_flash(args).await?,
             Commands::Eth(args) => self.handle_eth(args)?,
             Commands::Uart(args) => self.handle_uart(args)?,
             Commands::Cooling(args) => self.handle_cooling(args).await?,
             Commands::Advanced(args) => self.handle_advanced(args).await?,
+            // Returned above; the compiler cannot see that through the
+            // first match, so they are named rather than caught by a `_`
+            // arm that would also swallow a genuinely new command.
+            Commands::About | Commands::Thermal | Commands::Metrics(_) => {
+                unreachable!("handled by the fork dispatch above")
+            }
             Commands::Info => self.handle_info(),
             Commands::Reboot => self.handle_reboot(),
             #[cfg(feature = "localhost")]
@@ -109,7 +159,7 @@ impl LegacyHandler {
         }
 
         if self.skip_request {
-            return Ok(());
+            return Ok(0);
         }
 
         let response = self.request.send(self.client).await?;
@@ -126,8 +176,8 @@ impl LegacyHandler {
         };
 
         if self.json {
-            println!("{}", &body.to_string());
-            return Ok(());
+            println!("{body}");
+            return Ok(0);
         }
 
         body.get("response")
@@ -151,6 +201,7 @@ impl LegacyHandler {
                     }
                 });
             })
+            .map(|_| 0)
     }
 
     fn handle_info(&mut self) {
@@ -211,8 +262,8 @@ impl LegacyHandler {
         Ok(())
     }
 
-    async fn handle_firmware(&mut self, args: &FirmwareArgs) -> anyhow::Result<()> {
-        let (mut file, file_name, size) = Self::open_file(&args.file).await?;
+    async fn handle_firmware(&mut self, path: &Path, sha256: Option<&str>) -> anyhow::Result<()> {
+        let (mut file, file_name, size) = Self::open_file(path).await?;
         if self.version == ApiVersion::V1 {
             // Opt out of the global request/response handler as we implement an
             // alternative flow here.
@@ -233,7 +284,7 @@ impl LegacyHandler {
                 .append_pair("type", "firmware")
                 .append_pair("file", &file_name)
                 .append_pair("length", &size.to_string());
-            if let Some(sha256) = &args.sha256 {
+            if let Some(sha256) = sha256 {
                 self.request
                     .url_mut()
                     .query_pairs_mut()

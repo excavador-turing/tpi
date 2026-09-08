@@ -31,6 +31,7 @@ tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "macros", "fs
 tokio-util = "0.7.13"
 url = "2.5.4"
 board-info = { git = "https://github.com/turing-machines/bmcd", features = ["clap_derive"], optional = true }
+serde = { version = "1.0.229", features = ["derive"] }
 
 
 

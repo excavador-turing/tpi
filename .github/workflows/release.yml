@@ -36,7 +36,7 @@ jobs:
       - name: Install Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: '1.98.1'
           default: true
           profile: minimal
           target: ${{ matrix.target }}
