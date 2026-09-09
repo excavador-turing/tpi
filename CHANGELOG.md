@@ -15,6 +15,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.3] — 2026-09-09
+
+### Fixed
+
+- **Releases were green and empty.** The release job was upstream's, written
+  for a push to master: read the version from `Cargo.toml`, and if a tag for it
+  already exists, abort. This fork changed the trigger to the tag itself, so
+  the job ran *because* the tag was pushed, found it, and skipped every step
+  that publishes anything — while reporting success.
+
+  The result is that **1.1.0, 1.1.1, 1.2.0, 1.2.1 and 1.2.2 have no release
+  page and no binaries**, on a tool the documentation tells people to install.
+  This is the first release of this fork that actually ships something.
+
+  The job now publishes from the tag it was triggered by, and two guards stop
+  the failure recurring quietly: the tag must agree with `Cargo.toml`, and
+  there must be at least one artifact to attach. Both were checked in each
+  direction before this was tagged. The actions it calls are pinned by commit,
+  matching the other repositories here.
+
+
 ## [1.2.2] — 2026-09-09
 
 ### Fixed

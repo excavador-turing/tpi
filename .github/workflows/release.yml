@@ -139,51 +139,61 @@ jobs:
           name: ${{ env.PKG_NAME }}.deb
           path: ${{ env.PKG_NAME }}.deb
 
-  try-release:
+  release:
+    # This job was upstream's, written for a push to master: read the version
+    # from Cargo.toml, and if a tag for it already exists, abort. This fork
+    # changed the trigger to the tag itself -- so the job ran BECAUSE the tag
+    # was pushed, found it, and skipped every step that publishes anything.
+    #
+    # Every release since that change was green and empty: v1.1.0, v1.1.1,
+    # v1.2.0, v1.2.1 and v1.2.2 have no artifacts and no release page, while
+    # the site tells people to install this tool.
+    #
+    # A tag is the release act here. The tag exists; make the release from it.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     needs: debian-packages
+    permissions:
+      contents: write   # the release itself; nothing else writes
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Extract version from Cargo.toml
-        id: extract_version
-        run: |
-          VERSION=$(grep '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
 
-      - name: Check if tag exists
+      # A tag that disagrees with Cargo.toml means somebody tagged without
+      # bumping, and the release page would then name a version the binaries
+      # inside it do not report. Refuse rather than publish that.
+      - name: the tag and Cargo.toml must agree
         run: |
-          if git rev-parse --verify v${VERSION} >/dev/null 2>&1; then
-            echo "TAG_EXISTS=true" >> $GITHUB_ENV
-            echo "no new version detected, aborting release Pipeline"
-          else
-            echo "TAG_EXISTS=false" >> $GITHUB_ENV
+          set -eu
+          version=$(grep '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} but Cargo.toml says ${version}"
+            exit 1
           fi
-
-      - name: Create new tag
-        if: ${{ env.TAG_EXISTS == 'false' }}
-        run: |
-          git config --global user.name "${{ github.actor }}"
-          git config --global user.email "noreply@turingpi.com"
-          git tag -a "v${{ env.VERSION }}" -m "Release version ${{ env.VERSION }}"
-          git push origin "v${{ env.VERSION }}"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          echo "tag and manifest agree on ${version}"
 
       - name: Download artifacts
-        if: ${{ env.TAG_EXISTS == 'false' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.1.8
         with:
           path: artifacts
           merge-multiple: true
 
+      # Fail rather than publish an empty release, which is the failure this
+      # job is here to stop repeating.
+      - name: there must be something to release
+        run: |
+          set -eu
+          count=$(find artifacts -type f | wc -l)
+          [ "$count" -gt 0 ] || { echo "::error::no artifacts to attach"; exit 1; }
+          echo "attaching $count artifact(s):"
+          find artifacts -type f -printf '  %p (%s bytes)\n'
+
       - name: Release
-        if: ${{ env.TAG_EXISTS == 'false' }}
-        uses: ncipollo/release-action@v1
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
         with:
           name: tpi v${{ env.VERSION }}
-          tag: v${{ env.VERSION }}
+          tag: ${{ github.ref_name }}
           artifacts: artifacts/*
           generateReleaseNotes: true
