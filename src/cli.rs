@@ -127,10 +127,6 @@ pub enum Commands {
     #[command(arg_required_else_help = true)]
     Config(ConfigArgs),
 
-    /// The read-only credential the metrics endpoint accepts
-    #[command(arg_required_else_help = true)]
-    Metrics(MetricsArgs),
-
     /// Print turing-pi info
     Info,
 
@@ -424,13 +420,6 @@ pub enum ConfigCmd {
         /// Where to write it. Omit for stdout.
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Include the metrics token.
-        ///
-        /// This makes the file a credential: applied to another board it can
-        /// scrape it. Without this the token is absent from the document
-        /// entirely, not present and empty.
-        #[arg(long)]
-        with_secrets: bool,
     },
     /// Apply a previously exported file to this board
     Import {
@@ -440,20 +429,6 @@ pub enum ConfigCmd {
         #[arg(long)]
         yes: bool,
     },
-}
-
-#[derive(Args, Clone)]
-pub struct MetricsArgs {
-    #[command(subcommand)]
-    pub cmd: MetricsCmd,
-}
-
-#[derive(Subcommand, Clone)]
-pub enum MetricsCmd {
-    /// Print the current token
-    Show,
-    /// Replace the token. Anything scraping with the old one stops.
-    Rotate,
 }
 
 #[derive(Args, Clone)]

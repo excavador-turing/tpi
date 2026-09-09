@@ -15,6 +15,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-09-09
+
+### Removed
+
+- **`tpi metrics show | rotate`** (SQU-178). The metrics token is gone from
+  the daemon: `/metrics` moved to its own listener on port 9110 that takes no
+  credential, so there is nothing left to show or rotate. A script that calls
+  this now gets a clear "unrecognized subcommand" from clap rather than a
+  request that quietly does nothing.
+
+- **`tpi config export --with-secrets`**, and the warnings that went with it.
+  The export carried exactly one secret, the metrics token, so with that gone
+  the document is no longer a credential and the flag had nothing to include.
+
 ## [1.3.0] — 2026-09-09
 
 ### Added

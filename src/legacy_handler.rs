@@ -104,10 +104,6 @@ impl LegacyHandler {
             Commands::Thermal => {
                 return fork_cmd::thermal(&self.request, &self.client, self.json).await
             }
-            Commands::Metrics(args) => {
-                return fork_cmd::metrics_cmd(&self.request, &self.client, &args.cmd, self.json)
-                    .await
-            }
             Commands::Hostname(args) => {
                 return fork_cmd::hostname_cmd(&self.request, &self.client, args, self.json).await
             }
@@ -166,7 +162,6 @@ impl LegacyHandler {
             // arm that would also swallow a genuinely new command.
             Commands::About
             | Commands::Thermal
-            | Commands::Metrics(_)
             | Commands::Hostname(_)
             | Commands::Ntp(_)
             | Commands::Config(_) => {

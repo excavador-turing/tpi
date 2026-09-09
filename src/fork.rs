@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! The fork's additions to the BMC API: the firmware catalogue, the source
-//! list, the update check, the thermal sensor and the metrics token.
+//! list, the update check and the thermal sensor.
 //!
 //! Upstream's handler builds ONE request per command and prints its
 //! `response` key. That shape does not fit here. A catalogue is a table
@@ -46,7 +46,6 @@ use crate::request::Request;
 /// the rack. Being behind is the ordinary case, so it gets a real message
 /// rather than an error path.
 pub const SINCE_FIRMWARE_CATALOGUE: &str = "2.8.0";
-pub const SINCE_METRICS_TOKEN: &str = "2.7.0";
 pub const SINCE_THERMAL: &str = "2.5.0";
 /// The hostname and the time servers arrived together.
 pub const SINCE_HOSTNAME: &str = "2.13.0";

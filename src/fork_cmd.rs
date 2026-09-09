@@ -25,12 +25,12 @@ use anyhow::{bail, Context, Result};
 use reqwest::Client;
 
 use crate::cli::{
-    ConfigCmd, HostnameArgs, InstallArgs, ListArgs, MetricsCmd, NtpCmd, SourceAddArgs,
-    SourceKindArg, SourcesCmd,
+    ConfigCmd, HostnameArgs, InstallArgs, ListArgs, NtpCmd, SourceAddArgs, SourceKindArg,
+    SourcesCmd,
 };
 use crate::fork::{
     self, About, Relation, Source, SourceKind, Sources, SINCE_CONFIG, SINCE_FIRMWARE_CATALOGUE,
-    SINCE_HOSTNAME, SINCE_METRICS_TOKEN, SINCE_NTP, SINCE_THERMAL,
+    SINCE_HOSTNAME, SINCE_NTP, SINCE_THERMAL,
 };
 use crate::request::Request;
 
@@ -638,40 +638,6 @@ pub async fn thermal(request: &Request, client: &Client, json: bool) -> Result<u
     Ok(0)
 }
 
-pub async fn metrics_cmd(
-    request: &Request,
-    client: &Client,
-    cmd: &MetricsCmd,
-    json: bool,
-) -> Result<u8> {
-    gate(request, client, "metrics", SINCE_METRICS_TOKEN).await?;
-
-    let value = match cmd {
-        MetricsCmd::Show => fork::get(request, client, &[("type", "metrics_token")]).await?,
-        MetricsCmd::Rotate => fork::set(request, client, &[("type", "metrics_token")]).await?,
-    };
-
-    if json {
-        return emit_json(&value).map(|_| 0);
-    }
-
-    let token = value
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-
-    if token.is_empty() {
-        println!("{value}");
-        return Ok(0);
-    }
-
-    // The username is not a Unix account and people guess it wrong, so it is
-    // printed beside the token rather than left to the docs.
-    println!("username  metrics");
-    println!("token     {token}");
-    Ok(0)
-}
-
 /// `tpi hostname [<name>]`
 ///
 /// Printing and setting are one command because they are one question, and a
@@ -810,26 +776,14 @@ pub async fn config_cmd(
     gate(request, client, "config", SINCE_CONFIG).await?;
 
     match cmd {
-        ConfigCmd::Export { file, with_secrets } => {
-            let mut pairs: Vec<(&str, &str)> = vec![("type", "config")];
-            if *with_secrets {
-                pairs.push(("secrets", "1"));
-            }
-            let value = fork::get(request, client, &pairs).await?;
+        ConfigCmd::Export { file } => {
+            let value = fork::get(request, client, &[("type", "config")]).await?;
             let document = serde_json::to_string_pretty(&value)?;
 
             match file {
                 Some(path) => {
                     std::fs::write(path, format!("{document}\n"))
                         .with_context(|| format!("cannot write {}", path.display()))?;
-                    // Said on the way out, because the file is now a
-                    // credential and nothing about its name says so.
-                    if *with_secrets {
-                        eprintln!(
-                            "{} contains the metrics token: treat it as a credential",
-                            path.display()
-                        );
-                    }
                     if !json {
                         println!("written to {}", path.display());
                     }
@@ -860,13 +814,6 @@ pub async fn config_cmd(
                     .and_then(|v| v.as_str())
                     .unwrap_or("an unknown time");
                 println!("applying the settings exported from {from} at {at}");
-                if parsed
-                    .get("contains_secrets")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-                {
-                    println!("this export carries the metrics token; it will replace this board's");
-                }
                 if !std::io::stdin().is_terminal() {
                     bail!("refusing to import without confirmation; pass --yes for a non-interactive run");
                 }
