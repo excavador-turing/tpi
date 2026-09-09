@@ -20,6 +20,7 @@
 //! a second call or assemble a table from a list.
 
 use std::io::{IsTerminal, Write};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
@@ -242,6 +243,62 @@ pub async fn check(request: &Request, client: &Client, json: bool) -> Result<u8>
     Ok(0)
 }
 
+/// How long to wait for the board to re-poll its firmware sources.
+///
+/// Measured on a board on 2026-09-09: a poll spawned at 19:07:10 landed with a
+/// `checked_at` of 19:08:28, so **78 seconds** over four sources -- where
+/// `firmware_catalog`'s own comment says 16. `firmware.turingpi.com` is the
+/// slow one. Three minutes leaves headroom without hanging a terminal.
+const POLL_WAIT: Duration = Duration::from_secs(180);
+
+/// How often to ask whether the poll has landed. Cheap: it reads the cache.
+const POLL_STEP: Duration = Duration::from_secs(3);
+
+/// Whether a poll started when the catalogue read `before` has landed.
+///
+/// `checked_at` advances exactly once, when a poll completes, which makes this
+/// falsifiable: before the poll lands it still equals `before`. An empty
+/// `before` means the daemon does not report the field at all, and then there
+/// is nothing to watch -- say so rather than wait out the deadline.
+fn poll_landed(before: &str, now: &str) -> bool {
+    !before.is_empty() && now != before
+}
+
+/// Wait for a re-poll started with `refresh=1` to finish, and answer with what
+/// it found.
+///
+/// **`refresh=1` does not fetch.** The daemon spawns the poll and returns the
+/// cached list immediately, with `refreshing` set -- confirmed on a board,
+/// where a forced request came back in one second carrying the same
+/// `checked_at` it had before. So asking again with `refresh=1` and resolving
+/// against the answer resolves against the same stale list, which is exactly
+/// the bug this was meant to fix (SQU-184; tpi 1.5.0 shipped that mistake).
+///
+/// Returns the catalogue and whether the poll actually landed, so a refusal
+/// can say which kind of refusal it is.
+async fn await_poll(
+    request: &Request,
+    client: &Client,
+    before: &str,
+    started: fork::Catalog,
+) -> Result<(fork::Catalog, bool)> {
+    if before.is_empty() {
+        return Ok((started, false));
+    }
+    let mut catalog = started;
+    let deadline = Instant::now() + POLL_WAIT;
+    loop {
+        if poll_landed(before, &catalog.checked_at) {
+            return Ok((catalog, true));
+        }
+        if Instant::now() >= deadline {
+            return Ok((catalog, false));
+        }
+        tokio::time::sleep(POLL_STEP).await;
+        catalog = fork::catalog(request, client, false).await?;
+    }
+}
+
 /// Which (source, candidate) positions in `catalog` answer to what was asked
 /// for.
 ///
@@ -292,15 +349,32 @@ pub async fn install(
     // The cached listing can be up to half an hour behind the sources, and
     // `firmware check` reads a different cache with its own timing -- so
     // `check` prints "install it with: tpi firmware install <v>" and this
-    // resolution refuses the very command it printed. Ask again, forcing a
-    // poll, before believing no source has it. Only the path that was about
-    // to fail pays for the fan-out.
+    // resolution refuses the very command it printed. Ask for a re-poll and
+    // WAIT for it before believing no source has the version. Only the path
+    // that was about to fail wrongly pays for the wait.
+    let mut polled = true;
     if hits.is_empty() {
+        let before = catalog.checked_at.clone();
+        if !json {
+            println!(
+                "{} is not in the board's cached listing; asking it to re-poll its sources \
+                 (about a minute)",
+                args.target
+            );
+        }
+        // This starts the poll. It does NOT return its result -- see await_poll.
         catalog = fork::catalog(request, client, true).await?;
+        (catalog, polled) = await_poll(request, client, &before, catalog).await?;
         hits = matching(&catalog, args);
     }
 
     let (source, candidate) = match hits.len() {
+        0 if !polled => bail!(
+            "no source offers {}, but the board's re-poll did not finish within {} s, so that \
+             answer may be stale. Try `tpi firmware list --refresh --all`, then again.",
+            args.target,
+            POLL_WAIT.as_secs()
+        ),
         0 => bail!(
             "no source offers {}. `tpi firmware list --all` shows what this board can install",
             args.target
@@ -962,6 +1036,43 @@ mod tests {
             matching(&cat, &install_args("v2.16.0", Some("mirror"))),
             vec![(1, 0)]
         );
+    }
+
+    /// SQU-184, the second attempt. 1.5.0 asked for a re-poll and resolved
+    /// against the answer, which is the *cached* list -- the daemon spawns the
+    /// poll and returns at once. So the wait is the fix, and this is its
+    /// predicate: it must stay false until `checked_at` moves.
+    #[test]
+    fn a_poll_has_not_landed_until_checked_at_moves() {
+        let before = "2026-09-09T19:50:40Z";
+
+        assert!(
+            !poll_landed(before, before),
+            "the same timestamp means the poll is still running; \
+             treating it as landed is exactly the 1.5.0 bug"
+        );
+        assert!(poll_landed(before, "2026-09-09T19:59:43Z"));
+    }
+
+    /// A daemon that does not report `checked_at` gives nothing to watch, so
+    /// the wait must give up at once rather than burn the whole deadline.
+    #[test]
+    fn nothing_to_watch_is_not_a_landed_poll() {
+        assert!(!poll_landed("", ""));
+        assert!(!poll_landed("", "2026-09-09T19:59:43Z"));
+    }
+
+    /// The deadline is a measurement, not a guess: a poll over four sources
+    /// took 78 s on the board on 2026-09-09, against the 16 s
+    /// `firmware_catalog` claims. Anyone shrinking this below what the board
+    /// actually needs reintroduces the wrong refusal, silently.
+    #[test]
+    fn the_deadline_clears_the_measured_fan_out() {
+        assert!(
+            POLL_WAIT.as_secs() >= 120,
+            "measured 78 s over four sources; leave real headroom"
+        );
+        assert!(POLL_STEP < POLL_WAIT);
     }
 
     /// SQU-184: a stale catalogue made `firmware install` refuse the command
