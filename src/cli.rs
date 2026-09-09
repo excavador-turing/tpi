@@ -117,6 +117,16 @@ pub enum Commands {
     /// Board temperatures
     Thermal,
 
+    /// The board's name, as `about` reports it and mDNS advertises it
+    Hostname(HostnameArgs),
+
+    /// The time sources the board uses, and how its clock is doing on them
+    Ntp(NtpArgs),
+
+    /// Everything configured on this board, as one file
+    #[command(arg_required_else_help = true)]
+    Config(ConfigArgs),
+
     /// The read-only credential the metrics endpoint accepts
     #[command(arg_required_else_help = true)]
     Metrics(MetricsArgs),
@@ -276,6 +286,14 @@ pub struct UploadArgs {
     pub file: PathBuf,
     #[arg(long)]
     pub sha256: Option<String>,
+    /// Put the image on the board's SD card instead of installing it.
+    ///
+    /// It then appears in `tpi firmware list` under the `local` source, and
+    /// installing is a separate step. This is the loop for a build you are
+    /// iterating on: park once, install, reboot, park the next one -- without
+    /// each upload arming the board the moment it lands.
+    #[arg(long)]
+    pub park: bool,
 }
 
 #[derive(Args, Clone)]
@@ -348,6 +366,68 @@ pub enum SourceKindArg {
     Github,
     Http,
     Local,
+}
+
+#[derive(Args, Clone)]
+pub struct HostnameArgs {
+    /// The new name. Omit to print the current one.
+    ///
+    /// One DNS label: letters, digits and hyphens, and no dots. Changing it
+    /// moves the `instance` label on every metrics series, so a Prometheus
+    /// history does not follow the board across the rename.
+    pub name: Option<String>,
+}
+
+#[derive(Args, Clone)]
+pub struct NtpArgs {
+    #[command(subcommand)]
+    pub cmd: Option<NtpCmd>,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum NtpCmd {
+    /// Print the configured servers and the state of the clock
+    Show,
+    /// Replace the servers, in preference order
+    ///
+    /// The first is written with chrony's `prefer`, so a LAN source wins over
+    /// a pool that happens to answer faster. Pass none to go back to the
+    /// image's own pool.
+    Set {
+        #[arg(value_name = "SERVER")]
+        servers: Vec<String>,
+    },
+}
+
+#[derive(Args, Clone)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub cmd: ConfigCmd,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum ConfigCmd {
+    /// Write this board's settings to a file, or to stdout
+    Export {
+        /// Where to write it. Omit for stdout.
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Include the metrics token.
+        ///
+        /// This makes the file a credential: applied to another board it can
+        /// scrape it. Without this the token is absent from the document
+        /// entirely, not present and empty.
+        #[arg(long)]
+        with_secrets: bool,
+    },
+    /// Apply a previously exported file to this board
+    Import {
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Apply without asking.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Args, Clone)]

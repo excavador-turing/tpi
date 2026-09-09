@@ -48,6 +48,10 @@ use crate::request::Request;
 pub const SINCE_FIRMWARE_CATALOGUE: &str = "2.8.0";
 pub const SINCE_METRICS_TOKEN: &str = "2.7.0";
 pub const SINCE_THERMAL: &str = "2.5.0";
+/// The hostname and the time servers arrived together.
+pub const SINCE_HOSTNAME: &str = "2.13.0";
+pub const SINCE_NTP: &str = "2.13.0";
+pub const SINCE_CONFIG: &str = "2.14.0";
 
 /// What the board says about itself.
 #[derive(Debug, Clone, Deserialize)]
@@ -355,6 +359,16 @@ pub async fn catalog(request: &Request, client: &Client, refresh: bool) -> Resul
     }
     let v = get(request, client, &pairs).await?;
     serde_json::from_value(v).context("parsing the firmware catalogue")
+}
+
+/// The A/B slots, as raw JSON.
+///
+/// Untyped on purpose: `firmware list` reads two fields out of it to say what
+/// is staged and how the last boot went, and giving those a type here would
+/// mean a struct that has to track every field the daemon adds in order to
+/// keep reading the two that matter.
+pub async fn slots(request: &Request, client: &Client) -> Result<serde_json::Value> {
+    get(request, client, &[("type", "firmware_slots")]).await
 }
 
 pub async fn sources(request: &Request, client: &Client) -> Result<Sources> {

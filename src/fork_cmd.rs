@@ -24,10 +24,13 @@ use std::io::{IsTerminal, Write};
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
 
-use crate::cli::{InstallArgs, ListArgs, MetricsCmd, SourceAddArgs, SourceKindArg, SourcesCmd};
+use crate::cli::{
+    ConfigCmd, HostnameArgs, InstallArgs, ListArgs, MetricsCmd, NtpCmd, SourceAddArgs,
+    SourceKindArg, SourcesCmd,
+};
 use crate::fork::{
-    self, About, Relation, Source, SourceKind, Sources, SINCE_FIRMWARE_CATALOGUE,
-    SINCE_METRICS_TOKEN, SINCE_THERMAL,
+    self, About, Relation, Source, SourceKind, Sources, SINCE_CONFIG, SINCE_FIRMWARE_CATALOGUE,
+    SINCE_HOSTNAME, SINCE_METRICS_TOKEN, SINCE_NTP, SINCE_THERMAL,
 };
 use crate::request::Request;
 
@@ -82,6 +85,33 @@ pub async fn list(request: &Request, client: &Client, args: &ListArgs, json: boo
     }
 
     println!("running {}", catalog.running);
+
+    // What the board is about to do, and what it last did.
+    //
+    // Without this a shell user has no way to learn that a rollback happened
+    // at all: the gate rejects an image, the board reboots onto the old one,
+    // and `firmware list` would cheerfully report the old version as running
+    // with nothing to say an install had been attempted and refused.
+    if let Ok(slots) = fork::slots(request, client).await {
+        if let Some(staged) = slots
+            .get("staged")
+            .and_then(|s| s.get("version"))
+            .and_then(|v| v.as_str())
+        {
+            println!("staged  {staged}  (reboot to take it)");
+        }
+        if let Some(promotion) = slots.get("last_promotion") {
+            let message = promotion
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            // The gate writes its refusals with this prefix, and a refusal is
+            // the line worth putting in front of somebody.
+            if message.starts_with("FAILED") || message.contains("rolling back") {
+                println!("last boot  {message}");
+            }
+        }
+    }
 
     let mut rows: Vec<[String; 4]> = Vec::new();
     let mut hidden = 0usize;
@@ -557,6 +587,245 @@ pub async fn metrics_cmd(
     Ok(0)
 }
 
+/// `tpi hostname [<name>]`
+///
+/// Printing and setting are one command because they are one question, and a
+/// separate `hostname show` would be a subcommand whose only job is to be
+/// typed.
+pub async fn hostname_cmd(
+    request: &Request,
+    client: &Client,
+    args: &HostnameArgs,
+    json: bool,
+) -> Result<u8> {
+    gate(request, client, "hostname", SINCE_HOSTNAME).await?;
+
+    let Some(name) = args.name.as_deref() else {
+        let value = fork::get(request, client, &[("type", "hostname")]).await?;
+        if json {
+            return emit_json(&value).map(|_| 0);
+        }
+        let live = value.get("hostname").and_then(|v| v.as_str());
+        let next = value.get("on_next_boot").and_then(|v| v.as_str());
+        println!("{}", live.unwrap_or("(unreadable)"));
+        // Only when they disagree, which happens when someone has run
+        // `hostname` by hand. Printing it always would be noise on every board
+        // that is fine.
+        if let (Some(live), Some(next)) = (live, next) {
+            if live != next {
+                println!("after the next reboot: {next}");
+            }
+        }
+        return Ok(0);
+    };
+
+    // Said before it happens, not after: the series break is the part nobody
+    // expects, and it is not undone by renaming the board back.
+    if !json {
+        println!(
+            "renaming to {name}. The metrics `instance` label changes with it,              so a Prometheus history will not follow the board across the rename."
+        );
+    }
+
+    let value = fork::set(request, client, &[("type", "hostname"), ("name", name)]).await?;
+    if json {
+        return emit_json(&value).map(|_| 0);
+    }
+    println!("renamed to {name}");
+    Ok(0)
+}
+
+/// `tpi ntp show | set <servers...>`
+pub async fn ntp_cmd(
+    request: &Request,
+    client: &Client,
+    cmd: Option<&NtpCmd>,
+    json: bool,
+) -> Result<u8> {
+    gate(request, client, "ntp", SINCE_NTP).await?;
+
+    if let Some(NtpCmd::Set { servers }) = cmd {
+        let joined = servers.join(",");
+        let value = fork::set(request, client, &[("type", "ntp"), ("servers", &joined)]).await?;
+        if json {
+            return emit_json(&value).map(|_| 0);
+        }
+        if servers.is_empty() {
+            println!("cleared; the board is back to the pool its image ships with");
+        } else {
+            println!(
+                "{} server(s) set; {} is preferred",
+                servers.len(),
+                servers[0]
+            );
+        }
+        return Ok(0);
+    }
+
+    let value = fork::get(request, client, &[("type", "ntp")]).await?;
+    if json {
+        return emit_json(&value).map(|_| 0);
+    }
+
+    // A saved list that is never read is the one failure this cannot show by
+    // printing the servers, so it is said outright.
+    if value
+        .get("configurable")
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
+        println!(
+            "this board's firmware cannot take a server list: its chrony config              has no `sourcedir` line. Upgrade the firmware first."
+        );
+    }
+
+    match value.get("servers").and_then(|v| v.as_array()) {
+        Some(servers) if !servers.is_empty() => {
+            for (index, server) in servers.iter().enumerate() {
+                let name = server.as_str().unwrap_or_default();
+                if index == 0 {
+                    println!("{name}  (preferred)");
+                } else {
+                    println!("{name}");
+                }
+            }
+        }
+        _ => println!("no servers configured; the image's own pool is the only source"),
+    }
+
+    if let Some(clock) = value.get("clock") {
+        let synchronised = clock
+            .get("synchronised")
+            .and_then(serde_json::Value::as_bool);
+        let source = clock.get("source").and_then(|v| v.as_str());
+        let stratum = clock.get("stratum").and_then(serde_json::Value::as_u64);
+        match (synchronised, source) {
+            (Some(true), Some(source)) => {
+                let stratum = stratum
+                    .map(|s| format!(", stratum {s}"))
+                    .unwrap_or_default();
+                println!("\nsynchronised to {source}{stratum}");
+            }
+            (Some(false), _) => println!("\nNOT synchronised"),
+            _ => println!("\nthe clock's state could not be read"),
+        }
+    }
+    Ok(0)
+}
+
+/// `tpi config export | import`
+pub async fn config_cmd(
+    request: &Request,
+    client: &Client,
+    cmd: &ConfigCmd,
+    json: bool,
+) -> Result<u8> {
+    gate(request, client, "config", SINCE_CONFIG).await?;
+
+    match cmd {
+        ConfigCmd::Export { file, with_secrets } => {
+            let mut pairs: Vec<(&str, &str)> = vec![("type", "config")];
+            if *with_secrets {
+                pairs.push(("secrets", "1"));
+            }
+            let value = fork::get(request, client, &pairs).await?;
+            let document = serde_json::to_string_pretty(&value)?;
+
+            match file {
+                Some(path) => {
+                    std::fs::write(path, format!("{document}\n"))
+                        .with_context(|| format!("cannot write {}", path.display()))?;
+                    // Said on the way out, because the file is now a
+                    // credential and nothing about its name says so.
+                    if *with_secrets {
+                        eprintln!(
+                            "{} contains the metrics token: treat it as a credential",
+                            path.display()
+                        );
+                    }
+                    if !json {
+                        println!("written to {}", path.display());
+                    }
+                }
+                // No warning line here: stdout is very likely being piped
+                // somewhere, and a stray sentence would land in the file.
+                None => println!("{document}"),
+            }
+            Ok(0)
+        }
+
+        ConfigCmd::Import { file, yes } => {
+            let document = std::fs::read_to_string(file)
+                .with_context(|| format!("cannot read {}", file.display()))?;
+            // Parsed here rather than posted blind, so a file that is not an
+            // export fails before anything on the board changes.
+            let parsed: serde_json::Value = serde_json::from_str(&document)
+                .with_context(|| format!("{} is not a config export", file.display()))?;
+
+            if !yes && !json {
+                let from = parsed
+                    .get("exported_from")
+                    .and_then(|o| o.get("hostname"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("an unnamed board");
+                let at = parsed
+                    .get("exported_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("an unknown time");
+                println!("applying the settings exported from {from} at {at}");
+                if parsed
+                    .get("contains_secrets")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
+                    println!("this export carries the metrics token; it will replace this board's");
+                }
+                if !std::io::stdin().is_terminal() {
+                    bail!("refusing to import without confirmation; pass --yes for a non-interactive run");
+                }
+                print!("continue? [y/N] ");
+                std::io::stdout().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    println!("cancelled");
+                    return Ok(0);
+                }
+            }
+
+            let value = fork::set(
+                request,
+                client,
+                &[("type", "config"), ("config", &document)],
+            )
+            .await?;
+            if json {
+                return emit_json(&value).map(|_| 0);
+            }
+
+            // Per field, because the import is not transactional and a single
+            // "done" would hide a hostname that took and sources that did not.
+            let mut failed = false;
+            for (key, label) in [
+                ("applied", "applied"),
+                ("skipped", "skipped"),
+                ("failed", "FAILED"),
+            ] {
+                if let Some(items) = value.get(key).and_then(|v| v.as_array()) {
+                    for item in items {
+                        println!("{label:>8}  {}", item.as_str().unwrap_or_default());
+                    }
+                    if key == "failed" && !items.is_empty() {
+                        failed = true;
+                    }
+                }
+            }
+            // A partial apply is not a success. Exiting 0 would let a script
+            // move on from a board that is half configured.
+            Ok(if failed { 1 } else { 0 })
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

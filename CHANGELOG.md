@@ -15,6 +15,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-09-09
+
+### Added
+
+- **`tpi hostname [<name>]`** (SQU-138). Prints the live name, and the one that
+  takes effect at the next boot when the two disagree — which happens when
+  somebody has run `hostname` by hand. Setting it says, *before* it happens,
+  that the metrics `instance` label moves with the name and a Prometheus
+  history will not follow the board across the rename. That is the part nobody
+  expects, and renaming back does not undo it.
+- **`tpi ntp show | set <servers…>`** (SQU-167). The first server is the
+  preferred one. `set` with no servers goes back to the pool the image ships
+  with. `show` prints the clock's state underneath, and says outright when the
+  board's firmware has no `sourcedir` line — a saved list that is silently
+  never read is the one failure printing the servers cannot reveal.
+- **`tpi config export [--file] [--with-secrets]` and `tpi config import <file>`**
+  (SQU-142). `--with-secrets` includes the metrics token and warns **on
+  stderr** that the file is now a credential; when the export goes to stdout it
+  says nothing, because stdout is being piped somewhere and a stray sentence
+  would land in the file.
+
+  Import parses the file before posting it, so something that is not an export
+  fails before anything on the board changes, and prints the daemon's per-field
+  report. **It exits 1 if any field failed**: the import is not transactional,
+  and a script that moved on from a half-configured board would be worse than
+  one that stopped.
+- **`tpi firmware list` says what is staged and how the last boot went.**
+  Without it a shell user had no way to learn a rollback had happened at all —
+  the gate rejects an image, the board reboots onto the old one, and the list
+  would report the old version as running with nothing to say an install had
+  been attempted and refused.
+
 ## [1.1.1] — 2026-09-09
 
 ### Fixed
@@ -80,6 +112,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   accessible by integration" while clippy itself reported no warnings.
 - Releases are cut by a version tag rather than a push to the default branch.
 
-[Unreleased]: https://github.com/excavador-turing/tpi/compare/v1.1.1...hive
+[Unreleased]: https://github.com/excavador-turing/tpi/compare/v1.2.0...hive
+[1.2.0]: https://github.com/excavador-turing/tpi/releases/tag/v1.2.0
 [1.1.1]: https://github.com/excavador-turing/tpi/releases/tag/v1.1.1
 [1.1.0]: https://github.com/excavador-turing/tpi/releases/tag/v1.1.0

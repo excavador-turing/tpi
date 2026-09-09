@@ -108,6 +108,17 @@ impl LegacyHandler {
                 return fork_cmd::metrics_cmd(&self.request, &self.client, &args.cmd, self.json)
                     .await
             }
+            Commands::Hostname(args) => {
+                return fork_cmd::hostname_cmd(&self.request, &self.client, args, self.json).await
+            }
+            Commands::Ntp(args) => {
+                return fork_cmd::ntp_cmd(&self.request, &self.client, args.cmd.as_ref(), self.json)
+                    .await
+            }
+            Commands::Config(args) => {
+                return fork_cmd::config_cmd(&self.request, &self.client, &args.cmd, self.json)
+                    .await
+            }
             Commands::Firmware(args) => match &args.cmd {
                 Some(FirmwareCmd::List(a)) => {
                     return fork_cmd::list(&self.request, &self.client, a, self.json).await
@@ -131,11 +142,15 @@ impl LegacyHandler {
             Commands::Usb(args) => self.handle_usb(args)?,
             Commands::Firmware(args) => match (&args.cmd, &args.file) {
                 (Some(FirmwareCmd::Upload(u)), _) => {
-                    self.handle_firmware(&u.file, u.sha256.as_deref()).await?
+                    self.handle_firmware(&u.file, u.sha256.as_deref(), u.park)
+                        .await?
                 }
                 // `tpi firmware --file X` predates the subcommands and is in
                 // people's scripts; it keeps working and means `upload`.
-                (None, Some(file)) => self.handle_firmware(file, args.sha256.as_deref()).await?,
+                (None, Some(file)) => {
+                    self.handle_firmware(file, args.sha256.as_deref(), false)
+                        .await?
+                }
                 (None, None) => bail!(
                     "`tpi firmware` needs a subcommand: list, check, install, sources or upload"
                 ),
@@ -149,7 +164,12 @@ impl LegacyHandler {
             // Returned above; the compiler cannot see that through the
             // first match, so they are named rather than caught by a `_`
             // arm that would also swallow a genuinely new command.
-            Commands::About | Commands::Thermal | Commands::Metrics(_) => {
+            Commands::About
+            | Commands::Thermal
+            | Commands::Metrics(_)
+            | Commands::Hostname(_)
+            | Commands::Ntp(_)
+            | Commands::Config(_) => {
                 unreachable!("handled by the fork dispatch above")
             }
             Commands::Info => self.handle_info(),
@@ -262,7 +282,22 @@ impl LegacyHandler {
         Ok(())
     }
 
-    async fn handle_firmware(&mut self, path: &Path, sha256: Option<&str>) -> anyhow::Result<()> {
+    async fn handle_firmware(
+        &mut self,
+        path: &Path,
+        sha256: Option<&str>,
+        park: bool,
+    ) -> anyhow::Result<()> {
+        // Silently ignoring --park here would install an image the operator
+        // asked to merely put on the card, and the first they would know is a
+        // board rebooting into it.
+        if park && self.version == ApiVersion::V1 {
+            bail!(
+                "--park needs the v1-1 API; this run forced `-a v1`, where the board has no \
+                 park mode and would install the image instead"
+            );
+        }
+
         let (mut file, file_name, size) = Self::open_file(path).await?;
         if self.version == ApiVersion::V1 {
             // Opt out of the global request/response handler as we implement an
@@ -284,6 +319,14 @@ impl LegacyHandler {
                 .append_pair("type", "firmware")
                 .append_pair("file", &file_name)
                 .append_pair("length", &size.to_string());
+            if park {
+                // The daemon writes the image to the card and stops. Nothing
+                // is staged, so nothing is armed and no reboot is implied.
+                self.request
+                    .url_mut()
+                    .query_pairs_mut()
+                    .append_pair("park", "1");
+            }
             if let Some(sha256) = sha256 {
                 self.request
                     .url_mut()
