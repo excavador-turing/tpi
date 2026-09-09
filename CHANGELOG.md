@@ -15,7 +15,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-09-09
+
+### Fixed
+
+- **1.5.0's fix did not work; this one does** (SQU-184). 1.5.0 asked the board
+  to re-poll its sources and resolved against the answer. But
+  `firmware_available&refresh=1` **does not fetch** — the daemon spawns the
+  poll and returns the cached list immediately, with `refreshing` set. So the
+  second resolution ran against exactly the same stale list as the first, and
+  the change was inert.
+
+  Confirmed on the board: a forced request came back in one second carrying the
+  same `checked_at` it had before the call.
+
+  `install` now waits for the poll to land before re-resolving. The predicate
+  is `checked_at`, which advances exactly once a poll completes, so it can
+  actually be false while the poll runs — which is what 1.5.0 never checked.
+  The wait is bounded at 180 s; a refusal that hits that bound says so rather
+  than claiming no source has the version.
+
+  Measured on the board, same command, same question, a version that exists
+  nowhere:
+
+  | build | elapsed | `checked_at` |
+  |---|---|---|
+  | 1.5.0 | 1 s | unchanged |
+  | 1.5.1 | 58 s | 20:50:57 → 20:52:11 |
+
+  The deadline is a measurement too: a poll over four sources took 78 s, where
+  the daemon's own comment says 16. There is a test asserting the bound clears
+  it, so shrinking it cannot silently bring the wrong refusal back.
+
 ## [1.5.0] — 2026-09-09
+
+> **This release does not do what the entry below says.** The retry it added is
+> inert, for the reason in 1.5.1. Kept as written, because the mistake is more
+> useful on the record than tidied away.
+
+
 
 ### Fixed
 
