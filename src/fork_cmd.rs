@@ -242,6 +242,34 @@ pub async fn check(request: &Request, client: &Client, json: bool) -> Result<u8>
     Ok(0)
 }
 
+/// Which (source, candidate) positions in `catalog` answer to what was asked
+/// for.
+///
+/// Positions rather than references, so the caller can fetch the catalogue
+/// again and re-run this against the new one without fighting the borrow the
+/// first result would hold.
+///
+/// A leading `v` is optional on both sides: `firmware list` prints `v2.16.0`
+/// and people type either.
+fn matching(catalog: &fork::Catalog, args: &InstallArgs) -> Vec<(usize, usize)> {
+    let mut hits = Vec::new();
+    for (si, s) in catalog.sources.iter().enumerate() {
+        if let Some(want) = &args.source {
+            if &s.id != want {
+                continue;
+            }
+        }
+        for (ci, c) in s.candidates.iter().enumerate() {
+            if c.version == args.target
+                || c.version.trim_start_matches('v') == args.target.trim_start_matches('v')
+            {
+                hits.push((si, ci));
+            }
+        }
+    }
+    hits
+}
+
 pub async fn install(
     request: &Request,
     client: &Client,
@@ -255,35 +283,37 @@ pub async fn install(
         SINCE_FIRMWARE_CATALOGUE,
     )
     .await?;
-    let catalog = fork::catalog(request, client, false).await?;
-
     // Resolve the version against the listing rather than posting it blind:
     // the board would accept a source/version pair that offers nothing and
     // fail later, in the middle of a download.
-    let mut matches: Vec<(&crate::fork::SourceCatalog, &crate::fork::Candidate)> = Vec::new();
-    for s in &catalog.sources {
-        if let Some(want) = &args.source {
-            if &s.id != want {
-                continue;
-            }
-        }
-        for c in &s.candidates {
-            if c.version == args.target
-                || c.version.trim_start_matches('v') == args.target.trim_start_matches('v')
-            {
-                matches.push((s, c));
-            }
-        }
+    let mut catalog = fork::catalog(request, client, false).await?;
+    let mut hits = matching(&catalog, args);
+
+    // The cached listing can be up to half an hour behind the sources, and
+    // `firmware check` reads a different cache with its own timing -- so
+    // `check` prints "install it with: tpi firmware install <v>" and this
+    // resolution refuses the very command it printed. Ask again, forcing a
+    // poll, before believing no source has it. Only the path that was about
+    // to fail pays for the fan-out.
+    if hits.is_empty() {
+        catalog = fork::catalog(request, client, true).await?;
+        hits = matching(&catalog, args);
     }
 
-    let (source, candidate) = match matches.len() {
+    let (source, candidate) = match hits.len() {
         0 => bail!(
             "no source offers {}. `tpi firmware list --all` shows what this board can install",
             args.target
         ),
-        1 => matches[0],
+        1 => {
+            let (si, ci) = hits[0];
+            (&catalog.sources[si], &catalog.sources[si].candidates[ci])
+        }
         _ => {
-            let ids: Vec<&str> = matches.iter().map(|(s, _)| s.id.as_str()).collect();
+            let ids: Vec<&str> = hits
+                .iter()
+                .map(|(si, _)| catalog.sources[*si].id.as_str())
+                .collect();
             bail!(
                 "{} is offered by several sources ({}); choose one with --source",
                 args.target,
@@ -885,6 +915,80 @@ mod tests {
             file: file.map(str::to_string),
             size_bytes: None,
         }
+    }
+
+    fn catalog_of(sources: Vec<SourceCatalog>) -> crate::fork::Catalog {
+        crate::fork::Catalog {
+            refreshing: false,
+            checked_at: String::new(),
+            running: "v2.15.0".to_string(),
+            sources,
+        }
+    }
+
+    fn install_args(target: &str, source: Option<&str>) -> InstallArgs {
+        InstallArgs {
+            target: target.to_string(),
+            source: source.map(str::to_string),
+            yes: true,
+            force: false,
+        }
+    }
+
+    /// The catalogue is what decides whether an install is refused, so what
+    /// counts as a match is worth pinning: either spelling of the leading `v`,
+    /// and `--source` narrows rather than being advisory.
+    #[test]
+    fn a_version_is_found_with_or_without_its_v() {
+        let mut s = source("fork", None);
+        s.candidates = vec![candidate("v2.16.0", None)];
+        let cat = catalog_of(vec![s]);
+
+        assert_eq!(matching(&cat, &install_args("v2.16.0", None)), vec![(0, 0)]);
+        assert_eq!(matching(&cat, &install_args("2.16.0", None)), vec![(0, 0)]);
+        assert!(matching(&cat, &install_args("v2.15.0", None)).is_empty());
+    }
+
+    #[test]
+    fn source_narrows_the_match() {
+        let mut a = source("fork", None);
+        a.candidates = vec![candidate("v2.16.0", None)];
+        let mut b = source("mirror", None);
+        b.candidates = vec![candidate("v2.16.0", None)];
+        let cat = catalog_of(vec![a, b]);
+
+        assert_eq!(matching(&cat, &install_args("v2.16.0", None)).len(), 2);
+        assert_eq!(
+            matching(&cat, &install_args("v2.16.0", Some("mirror"))),
+            vec![(1, 0)]
+        );
+    }
+
+    /// SQU-184: a stale catalogue made `firmware install` refuse the command
+    /// `firmware check` had just printed. The fix re-resolves against a forced
+    /// poll, so what matters is that the same question asked of a fresher
+    /// catalogue gives a different answer -- and that the positions returned
+    /// index the catalogue they were computed from, since the caller swaps it.
+    #[test]
+    fn a_refreshed_catalogue_resolves_what_the_stale_one_could_not() {
+        let args = install_args("v2.16.0", None);
+
+        let mut stale_source = source("fork", None);
+        stale_source.candidates = vec![candidate("v2.15.0", None)];
+        let stale = catalog_of(vec![stale_source]);
+        assert!(
+            matching(&stale, &args).is_empty(),
+            "the stale catalogue is what produced the wrong refusal"
+        );
+
+        let mut fresh_source = source("fork", None);
+        fresh_source.candidates = vec![candidate("v2.15.0", None), candidate("v2.16.0", None)];
+        let fresh = catalog_of(vec![fresh_source]);
+
+        let hits = matching(&fresh, &args);
+        assert_eq!(hits, vec![(0, 1)]);
+        let (si, ci) = hits[0];
+        assert_eq!(fresh.sources[si].candidates[ci].version, "v2.16.0");
     }
 
     /// The bug in 1.1.0: an image already on the board was posted to
