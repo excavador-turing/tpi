@@ -15,6 +15,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-09-09
+
+### Added
+
+- **`tpi cooling set <device> <speed> --hold`** holds the fan at a step by
+  pausing the zone's governor, and **`--auto`** hands it back (SQU-170).
+  Without `--hold` the command means what it always did: write the step and let
+  the governor take it back a few seconds later. `--override` is accepted as an
+  alias for `--hold`.
+
+- **`tpi cooling status` has a Governor column**, reading the `overridden`
+  field bmcd 2.21 added. A daemon that does not send it prints `-` rather than
+  `running`, because "the governor is running" is the one fact the column
+  exists to report and an older daemon has not reported it.
+
 ## [1.2.3] — 2026-09-09
 
 ### Fixed

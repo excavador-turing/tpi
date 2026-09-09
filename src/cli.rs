@@ -500,6 +500,18 @@ pub struct CoolingArgs {
     pub device: Option<String>,
     /// Specify the cooling device speed (required for set command)
     pub speed: Option<u32>,
+    /// Hold the speed: pause the zone's governor so the step stays put
+    ///
+    /// Without this the kernel takes the fan back at its next poll, a few
+    /// seconds later, because the governor is what decides the step.
+    #[arg(long, visible_alias = "override")]
+    pub hold: bool,
+    /// Hand the fan back to the kernel's governor
+    ///
+    /// Clears a hold. No speed is needed, because the governor is about to
+    /// choose one.
+    #[arg(long, conflicts_with = "hold")]
+    pub auto: bool,
 }
 
 #[derive(ValueEnum, Clone, PartialEq, Eq)]

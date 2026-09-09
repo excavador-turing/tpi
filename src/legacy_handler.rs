@@ -663,20 +663,36 @@ impl LegacyHandler {
                     .append_pair("opt", "get")
                     .append_pair("type", "cooling");
             }
-            CoolingCmd::Set => match (args.device.as_ref(), args.speed) {
-                (Some(device), Some(speed)) => {
-                    serializer
-                        .append_pair("opt", "set")
-                        .append_pair("type", "cooling")
-                        .append_pair("device", device)
-                        .append_pair("speed", &speed.to_string());
-                }
-                _ => {
+            CoolingCmd::Set => {
+                let Some(device) = args.device.as_ref() else {
                     return Err(anyhow::anyhow!(
-                        "Device and speed arguments are required for the set command"
+                        "A device argument is required for the set command"
                     ));
+                };
+
+                serializer
+                    .append_pair("opt", "set")
+                    .append_pair("type", "cooling")
+                    .append_pair("device", device);
+
+                if args.auto {
+                    // No speed: the daemon resumes the governor and lets it
+                    // pick the step, so a number sent here would only be
+                    // overwritten a poll later.
+                    serializer.append_pair("mode", "auto");
+                } else {
+                    let Some(speed) = args.speed else {
+                        return Err(anyhow::anyhow!(
+                            "A speed argument is required for the set command, \
+                             unless --auto is given"
+                        ));
+                    };
+                    serializer.append_pair("speed", &speed.to_string());
+                    if args.hold {
+                        serializer.append_pair("mode", "manual");
+                    }
                 }
-            },
+            }
         }
 
         self.response_printer = Some(cooling_printer);
@@ -849,12 +865,27 @@ fn cooling_printer(map: &serde_json::Value) -> anyhow::Result<()> {
     if results.is_empty() {
         println!("No cooling devices found");
     } else {
-        println!("|{:-^15}|{:-^7}|{:-^11}|", "Device", "Speed", "Max Speed");
+        println!(
+            "|{:-^15}|{:-^7}|{:-^11}|{:-^10}|",
+            "Device", "Speed", "Max Speed", "Governor"
+        );
         for device in results {
             let name = get_json_str(device, "device");
             let speed = get_json_num(device, "speed");
             let max_speed = get_json_num(device, "max_speed");
-            println!("|{:<15}|{:>7}|{:>11}|", name, speed, max_speed);
+            // A daemon older than 2.21 sends no `overridden`, and the honest
+            // word for that is not "running" -- it is that this daemon does
+            // not say. Printing "running" there would be inventing the one
+            // fact this column exists to report.
+            let governor = match device.get("overridden").and_then(|o| o.as_bool()) {
+                Some(true) => "paused",
+                Some(false) => "running",
+                None => "-",
+            };
+            println!(
+                "|{:<15}|{:>7}|{:>11}|{:>10}|",
+                name, speed, max_speed, governor
+            );
         }
     }
 
