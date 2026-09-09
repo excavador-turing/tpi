@@ -15,6 +15,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-09-09
+
+### Fixed
+
+- **`firmware install` no longer refuses the command `firmware check` just
+  printed** (SQU-184). The two read different caches with independent timing:
+  `check` asks the board's update checker, which reaches GitHub, while
+  `install` resolved the requested version against the firmware catalogue,
+  whose entries are fresh for half an hour. For up to that long after a
+  release, one could see it and the other could not.
+
+  Reproduced on a board at 18:57:03 UTC, twenty-seven seconds after v2.16.0
+  published: `check` printed `install it with: tpi firmware install v2.16.0`
+  and exited 10; the very next command answered `no source offers v2.16.0`
+  and exited 1.
+
+  `install` now re-resolves against a forced poll before believing that no
+  source has the version. The successful path is unchanged and pays nothing;
+  only the request that was about to be refused waits for the fan-out, which
+  is nothing against a firmware download. Aligning the two cache lifetimes was
+  considered and rejected: the checker saw the release immediately despite a
+  nominally longer cache, so their states are independent and no ordering
+  between them can be assumed.
+
+  The refusal itself stays. Posting an unresolved version to the board would
+  fail in the middle of a download instead of before it starts.
+
 ## [1.4.0] — 2026-09-09
 
 ### Removed
