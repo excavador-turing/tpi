@@ -21,7 +21,7 @@
 
 use std::io::{IsTerminal, Write};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use reqwest::Client;
 
 use crate::cli::{InstallArgs, ListArgs, MetricsCmd, SourceAddArgs, SourceKindArg, SourcesCmd};
@@ -214,7 +214,7 @@ pub async fn install(
     // Resolve the version against the listing rather than posting it blind:
     // the board would accept a source/version pair that offers nothing and
     // fail later, in the middle of a download.
-    let mut matches: Vec<(&str, &crate::fork::Candidate)> = Vec::new();
+    let mut matches: Vec<(&crate::fork::SourceCatalog, &crate::fork::Candidate)> = Vec::new();
     for s in &catalog.sources {
         if let Some(want) = &args.source {
             if &s.id != want {
@@ -225,19 +225,19 @@ pub async fn install(
             if c.version == args.version
                 || c.version.trim_start_matches('v') == args.version.trim_start_matches('v')
             {
-                matches.push((&s.id, c));
+                matches.push((s, c));
             }
         }
     }
 
-    let (source_id, candidate) = match matches.len() {
+    let (source, candidate) = match matches.len() {
         0 => bail!(
             "no source offers {}. `tpi firmware list --all` shows what this board can install",
             args.version
         ),
         1 => matches[0],
         _ => {
-            let ids: Vec<&str> = matches.iter().map(|(id, _)| *id).collect();
+            let ids: Vec<&str> = matches.iter().map(|(s, _)| s.id.as_str()).collect();
             bail!(
                 "{} is offered by several sources ({}); choose one with --source",
                 args.version,
@@ -262,7 +262,7 @@ pub async fn install(
             "{direction} {} -> {} from {} ({})",
             catalog.running,
             candidate.version,
-            source_id,
+            source.id,
             candidate.trust.label()
         );
 
@@ -280,22 +280,82 @@ pub async fn install(
         }
     }
 
-    let mut pairs: Vec<(&str, &str)> = vec![
-        ("type", "firmware_install"),
-        ("source", source_id),
-        ("version", &candidate.version),
-    ];
-    if args.force {
-        pairs.push(("force", "1"));
-    }
+    let pairs = install_request(source, candidate, args.force)?;
+    let local = source.kind == Some(SourceKind::Local);
 
-    let response = fork::set(request, client, &pairs).await?;
+    let response = fork::set(
+        request,
+        client,
+        &pairs
+            .iter()
+            .map(|(k, v)| (*k, v.as_str()))
+            .collect::<Vec<_>>(),
+    )
+    .await?;
     if json {
         return emit_json(&response).map(|_| 0);
     }
 
+    // The transfer endpoint answers with a handle and writes in the
+    // background. Without following it, this would print "staged" while the
+    // write was still running, and a reboot would land on a half-written
+    // image. `firmware_install` blocks until the updater is done, so it needs
+    // none of this.
+    if local {
+        let handle = response
+            .get("handle")
+            .and_then(serde_json::Value::as_u64)
+            .context("the board accepted the image but named no transfer to follow")?;
+        crate::legacy_handler::LegacyHandler::watch_flash_progress(request, client, handle)
+            .await
+            .context("waiting for the flash to finish")?;
+    }
+
     println!("staged {}; reboot to take it", candidate.version);
     Ok(0)
+}
+
+/// Builds the query for installing one resolved candidate.
+///
+/// Split out so the choice between the two endpoints is testable without a
+/// board. It is not a detail: an image already on the board is not fetched, so
+/// it does not go through `firmware_install`, and the daemon refuses that pair
+/// by design -- *"a local image is installed through opt=set&type=firmware
+/// with local=1"*. Posting the wrong one is a 400 at the end of a resolution
+/// that otherwise worked, which is exactly what 1.1.0 did.
+fn install_request(
+    source: &crate::fork::SourceCatalog,
+    candidate: &crate::fork::Candidate,
+    force: bool,
+) -> Result<Vec<(&'static str, String)>> {
+    let mut pairs: Vec<(&'static str, String)> = if source.kind == Some(SourceKind::Local) {
+        let Some(file) = candidate.file.as_deref() else {
+            bail!(
+                "{} is listed by {} but the board did not say which file it is",
+                candidate.version,
+                source.id
+            )
+        };
+        vec![
+            ("type", "firmware".to_string()),
+            ("local", "1".to_string()),
+            ("file", file.to_string()),
+        ]
+    } else {
+        vec![
+            ("type", "firmware_install".to_string()),
+            ("source", source.id.clone()),
+            ("version", candidate.version.clone()),
+        ]
+    };
+
+    // Both endpoints refuse when something is already staged, for the same
+    // reason -- the updater writes into the volume nextboot points at -- and
+    // both take the same escape.
+    if force {
+        pairs.push(("force", "1".to_string()));
+    }
+    Ok(pairs)
 }
 
 pub async fn sources(
@@ -495,4 +555,114 @@ pub async fn metrics_cmd(
     println!("username  metrics");
     println!("token     {token}");
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fork::{Candidate, SourceCatalog, Trust};
+
+    fn source(id: &str, kind: Option<SourceKind>) -> SourceCatalog {
+        SourceCatalog {
+            id: id.to_string(),
+            label: id.to_string(),
+            kind,
+            location: "somewhere".to_string(),
+            candidates: Vec::new(),
+            error: None,
+        }
+    }
+
+    fn candidate(version: &str, file: Option<&str>) -> Candidate {
+        Candidate {
+            version: version.to_string(),
+            relation: Relation::Newer,
+            prerelease: false,
+            trust: Trust::Unverified,
+            file: file.map(str::to_string),
+            size_bytes: None,
+        }
+    }
+
+    /// The bug in 1.1.0: an image already on the board was posted to
+    /// `firmware_install`, which the daemon refuses for a local source. The
+    /// resolution succeeded and the install failed with a 400.
+    #[test]
+    fn a_local_image_goes_through_the_transfer_endpoint() {
+        let s = source("local", Some(SourceKind::Local));
+        let c = candidate(
+            "v2.8.1-rc1",
+            Some("/mnt/sdcard/firmware/tp2-bmc-firmware-ota-v2.8.1-rc1.tpu"),
+        );
+        let pairs = install_request(&s, &c, false).expect("builds");
+
+        assert_eq!(pairs[0], ("type", "firmware".to_string()));
+        assert_eq!(pairs[1], ("local", "1".to_string()));
+        assert_eq!(
+            pairs[2],
+            (
+                "file",
+                "/mnt/sdcard/firmware/tp2-bmc-firmware-ota-v2.8.1-rc1.tpu".to_string()
+            )
+        );
+        assert!(
+            !pairs.iter().any(|(k, _)| *k == "version"),
+            "the transfer endpoint takes a path, not a version: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn a_remote_release_still_goes_through_firmware_install() {
+        let s = source("fork", Some(SourceKind::Github));
+        let c = candidate("v2.9.0", None);
+        let pairs = install_request(&s, &c, false).expect("builds");
+
+        assert_eq!(pairs[0], ("type", "firmware_install".to_string()));
+        assert_eq!(pairs[1], ("source", "fork".to_string()));
+        assert_eq!(pairs[2], ("version", "v2.9.0".to_string()));
+        assert!(!pairs.iter().any(|(k, _)| *k == "local"));
+    }
+
+    /// A daemon too old to report `kind` cannot be a local source anyway --
+    /// the catalogue that introduced local sources introduced the field with
+    /// it -- so absent must read as "not local" rather than as a guess.
+    #[test]
+    fn an_unstated_kind_is_not_treated_as_local() {
+        let s = source("fork", None);
+        let c = candidate("v2.9.0", None);
+        let pairs = install_request(&s, &c, false).expect("builds");
+        assert_eq!(pairs[0], ("type", "firmware_install".to_string()));
+    }
+
+    /// Both endpoints refuse when an image is already staged, and both take
+    /// the same escape. Forgetting it on one of them would make `--force`
+    /// silently mean nothing for parked images.
+    #[test]
+    fn force_reaches_both_endpoints() {
+        let local = source("local", Some(SourceKind::Local));
+        let remote = source("fork", Some(SourceKind::Github));
+        let c = candidate("v2.9.0", Some("/mnt/sdcard/firmware/x.tpu"));
+
+        for s in [&local, &remote] {
+            let pairs = install_request(s, &c, true).expect("builds");
+            assert_eq!(
+                pairs.last(),
+                Some(&("force", "1".to_string())),
+                "force missing for {}",
+                s.id
+            );
+        }
+    }
+
+    /// A local candidate the board listed without a path cannot be installed,
+    /// and saying so beats posting a request with an empty `file`.
+    #[test]
+    fn a_local_candidate_with_no_path_is_refused_by_name() {
+        let s = source("local", Some(SourceKind::Local));
+        let c = candidate("v2.8.1-rc1", None);
+        let err = install_request(&s, &c, false).expect_err("must refuse");
+        let message = format!("{err}");
+        assert!(message.contains("v2.8.1-rc1"), "{message}");
+        assert!(message.contains("local"), "{message}");
+    }
 }

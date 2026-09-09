@@ -64,6 +64,30 @@ async fn execute_cli_command(cli: &Cli) -> anyhow::Result<u8> {
     let host = url::Host::parse(cli.host.as_ref().expect("host has a default set"))
         .map_err(|_| anyhow::anyhow!("please enter a valid hostname"))?;
     let mut host = host.to_string();
+
+    // A name that does not resolve is the likeliest reason a first run fails,
+    // and reqwest reports it as "error sending request for url (...)", which
+    // names the URL and not the problem. Check it here, and only for the
+    // default: an address the operator typed deserves the real error, not a
+    // guess about DNS.
+    //
+    // The name is silent on firmware v2.8.0 and earlier of this fork -- the
+    // rootfs-headroom pass dropped avahi and nothing replaced it until v2.8.1
+    // -- so this fires most often against a board that is running perfectly.
+    if host == cli::DEFAULT_HOST_NAME
+        && tokio::net::lookup_host((host.as_str(), 443u16))
+            .await
+            .is_err()
+    {
+        anyhow::bail!(
+            "{host} did not resolve.\n\n\
+             It is the default because the board advertises it over mDNS, but \
+             firmware v2.8.0 and earlier of this fork ship without an mDNS \
+             responder; v2.8.1 restores it.\n\n\
+             Give the address instead: `--host <address>`, or set TPI_HOSTNAME."
+        );
+    }
+
     // connect to specific port if specified.
     if let Some(port) = cli.port {
         host.push_str(&format!(":{}", port));

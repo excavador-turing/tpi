@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.3/.schema/devbox.schema.json",
+  "packages": {
+    "rustup": "latest",
+    "just": "latest",
+    "pkg-config": "latest",
+    "openssl": {
+      "version": "latest",
+      "outputs": [
+        "out",
+        "dev"
+      ]
+    }
+  },
+  "env": {
+    "RUSTUP_HOME": "$PWD/.rustup",
+    "CARGO_HOME": "$PWD/.cargo",
+    "PATH": "$PWD/.cargo/bin:$PATH",
+    "PKG_CONFIG_PATH": "$PWD/.devbox/nix/profile/default/lib/pkgconfig"
+  },
+  "shell": {
+    "init_hook": [
+      "rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install --profile minimal --no-self-update",
+      "echo 'tpi: just check runs exactly what CI runs'"
+    ]
+  }
+}

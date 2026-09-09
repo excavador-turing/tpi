@@ -1,1 +1,4 @@
+.cargo/
+.devbox/
+.rustup/
 /target

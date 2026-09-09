@@ -131,6 +131,14 @@ pub struct Candidate {
 pub struct SourceCatalog {
     pub id: String,
     pub label: String,
+    /// How the board reaches this source. It decides how an install is posted
+    /// -- a file already on the board is staged through the transfer
+    /// endpoint, not through `firmware_install` -- so it is read, not
+    /// decorative. Optional because a daemon older than the catalogue would
+    /// omit it; the version gate makes that unreachable, and `None` then
+    /// means "not local", which is the safe reading.
+    #[serde(default)]
+    pub kind: Option<SourceKind>,
     pub location: String,
     #[serde(default)]
     pub candidates: Vec<Candidate>,

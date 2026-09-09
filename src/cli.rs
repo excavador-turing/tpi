@@ -15,10 +15,14 @@
 use clap::{builder::NonEmptyStringValueParser, Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+/// The board answers to this over mDNS, which is what upstream's
+/// documentation tells people to use. It is `pub(crate)` because `main` needs
+/// to tell "the user gave us an address that is down" from "we guessed a name
+/// and it does not resolve" -- two very different things to print.
 #[cfg(not(feature = "localhost"))]
-const DEFAULT_HOST_NAME: &str = "turingpi.local";
+pub(crate) const DEFAULT_HOST_NAME: &str = "turingpi.local";
 #[cfg(feature = "localhost")]
-const DEFAULT_HOST_NAME: &str = "127.0.0.1";
+pub(crate) const DEFAULT_HOST_NAME: &str = "127.0.0.1";
 
 /// Commandline interface that controls turing-pi's BMC. The BMC must be connected to a network
 /// that is reachable over TCP/IP in order for this tool to function. All commands are persisted by

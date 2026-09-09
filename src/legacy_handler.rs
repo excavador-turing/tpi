@@ -388,11 +388,25 @@ impl LegacyHandler {
     }
 
     fn create_progress_watching_thread(&self, handle_id: u64) -> JoinHandle<()> {
+        Self::watch_flash_progress(&self.request, &self.client, handle_id)
+    }
+
+    /// Follows a flash to completion, drawing the daemon's progress.
+    ///
+    /// An associated function rather than a method because `tpi firmware
+    /// install` of an image already on the board goes through the transfer
+    /// endpoint with no upload, and needs exactly this and nothing else the
+    /// handler owns.
+    pub(crate) fn watch_flash_progress(
+        request: &Request,
+        client: &Client,
+        handle_id: u64,
+    ) -> JoinHandle<()> {
         let initial_delay = Duration::from_secs(3);
         let update_period = Duration::from_millis(500);
 
-        let client = self.client.clone();
-        let mut req = self.request.clone();
+        let client = client.clone();
+        let mut req = request.clone();
 
         req.url_mut()
             .query_pairs_mut()
