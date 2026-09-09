@@ -20,7 +20,6 @@
 //! a second call or assemble a table from a list.
 
 use std::io::{IsTerminal, Write};
-use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
@@ -72,12 +71,24 @@ pub async fn list(request: &Request, client: &Client, args: &ListArgs, json: boo
     // not mistaken for a hang.
     if args.refresh && catalog.refreshing {
         eprintln!("polling the sources...");
-        for _ in 0..30 {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let mut landed = false;
+        for _ in 0..POLL_ATTEMPTS {
+            tokio::time::sleep(POLL_STEP).await;
             catalog = fork::catalog(request, client, false).await?;
             if !catalog.refreshing {
+                landed = true;
                 break;
             }
+        }
+        // Saying nothing here is how `--refresh` came to be able to lie: the
+        // loop gave up and printed the previous listing, indistinguishable
+        // from a current one.
+        if !landed {
+            eprintln!(
+                "the board is still polling after {} s; the listing below is as of {}",
+                (POLL_ATTEMPTS * POLL_STEP.as_secs()),
+                catalog.checked_at
+            );
         }
     }
 
@@ -102,6 +113,7 @@ pub async fn list(request: &Request, client: &Client, args: &ListArgs, json: boo
     }
 
     println!("running {}", catalog.running);
+    println!("listing checked {}", age_phrase(catalog.age_seconds));
 
     // What the board is about to do, and what it last did.
     //
@@ -243,59 +255,76 @@ pub async fn check(request: &Request, client: &Client, json: bool) -> Result<u8>
     Ok(0)
 }
 
-/// How long to wait for the board to re-poll its firmware sources.
+/// How long `--refresh` waits for the board's poll, and how often it looks.
 ///
-/// Measured on a board on 2026-09-09: a poll spawned at 19:07:10 landed with a
-/// `checked_at` of 19:08:28, so **78 seconds** over four sources -- where
-/// `firmware_catalog`'s own comment says 16. `firmware.turingpi.com` is the
-/// slow one. Three minutes leaves headroom without hanging a terminal.
-const POLL_WAIT: Duration = Duration::from_secs(180);
+/// The bound was 30 attempts of 2 s. Polls timed on a board on 2026-09-09 took
+/// 74 s, 78 s and 140 s, so a minute was short of the ordinary case and less
+/// than half the worst -- and exhausting it printed the stale listing with
+/// nothing said. Four minutes clears every figure measured; the loop says so
+/// when it gives up.
+const POLL_ATTEMPTS: u64 = 120;
+const POLL_STEP: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// How often to ask whether the poll has landed. Cheap: it reads the cache.
-const POLL_STEP: Duration = Duration::from_secs(3);
-
-/// Whether a poll started when the catalogue read `before` has landed.
+/// Which source to ask when the listing does not carry the version.
 ///
-/// `checked_at` advances exactly once, when a poll completes, which makes this
-/// falsifiable: before the poll lands it still equals `before`. An empty
-/// `before` means the daemon does not report the field at all, and then there
-/// is nothing to watch -- say so rather than wait out the deadline.
-fn poll_landed(before: &str, now: &str) -> bool {
-    !before.is_empty() && now != before
+/// In order: what `--source` said; the source the running firmware came from,
+/// since that is where this board's images have been coming from; the only
+/// remote source, if there is just one. A local source is never chosen -- an
+/// image absent from the listing is by definition not the file sitting on the
+/// SD card.
+fn blind_source(catalog: &fork::Catalog, args: &InstallArgs) -> Result<String> {
+    if let Some(want) = &args.source {
+        return Ok(want.clone());
+    }
+    let remote: Vec<&fork::SourceCatalog> = catalog
+        .sources
+        .iter()
+        .filter(|s| s.kind != Some(SourceKind::Local))
+        .collect();
+
+    if let Some(s) = remote
+        .iter()
+        .find(|s| s.candidates.iter().any(|c| c.version == catalog.running))
+    {
+        return Ok(s.id.clone());
+    }
+    match remote.as_slice() {
+        [only] => Ok(only.id.clone()),
+        [] => bail!("no remote firmware source is configured; `tpi firmware sources` shows them"),
+        many => {
+            let ids: Vec<&str> = many.iter().map(|s| s.id.as_str()).collect();
+            bail!(
+                "{} is not in the board's cached listing, and several sources could have it \
+                 ({}); name one with --source",
+                args.target,
+                ids.join(", ")
+            )
+        }
+    }
 }
 
-/// Wait for a re-poll started with `refresh=1` to finish, and answer with what
-/// it found.
+/// The install query for a version the listing does not carry.
 ///
-/// **`refresh=1` does not fetch.** The daemon spawns the poll and returns the
-/// cached list immediately, with `refreshing` set -- confirmed on a board,
-/// where a forced request came back in one second carrying the same
-/// `checked_at` it had before. So asking again with `refresh=1` and resolving
-/// against the answer resolves against the same stale list, which is exactly
-/// the bug this was meant to fix (SQU-184; tpi 1.5.0 shipped that mistake).
-///
-/// Returns the catalogue and whether the poll actually landed, so a refusal
-/// can say which kind of refusal it is.
-async fn await_poll(
-    request: &Request,
-    client: &Client,
-    before: &str,
-    started: fork::Catalog,
-) -> Result<(fork::Catalog, bool)> {
-    if before.is_empty() {
-        return Ok((started, false));
+/// Always the remote form: the local one needs a file path, which only the
+/// listing could supply.
+fn blind_request(source_id: &str, version: &str, force: bool) -> Vec<(&'static str, String)> {
+    let mut pairs = vec![
+        ("type", "firmware_install".to_string()),
+        ("source", source_id.to_string()),
+        ("version", version.to_string()),
+    ];
+    if force {
+        pairs.push(("force", "1".to_string()));
     }
-    let mut catalog = started;
-    let deadline = Instant::now() + POLL_WAIT;
-    loop {
-        if poll_landed(before, &catalog.checked_at) {
-            return Ok((catalog, true));
-        }
-        if Instant::now() >= deadline {
-            return Ok((catalog, false));
-        }
-        tokio::time::sleep(POLL_STEP).await;
-        catalog = fork::catalog(request, client, false).await?;
+    pairs
+}
+
+/// How old a listing is, in words, for a line a person reads.
+fn age_phrase(seconds: u64) -> String {
+    match seconds {
+        0..=90 => "just now".to_string(),
+        s if s < 5400 => format!("{} min ago", s / 60),
+        s => format!("{} h ago", s / 3600),
     }
 }
 
@@ -340,49 +369,27 @@ pub async fn install(
         SINCE_FIRMWARE_CATALOGUE,
     )
     .await?;
-    // Resolve the version against the listing rather than posting it blind:
-    // the board would accept a source/version pair that offers nothing and
-    // fail later, in the middle of a download.
-    let mut catalog = fork::catalog(request, client, false).await?;
-    let mut hits = matching(&catalog, args);
+    // The listing informs; it does not decide.
+    //
+    // It used to REFUSE a version it did not carry, on the grounds that the
+    // board "would accept a source/version pair that offers nothing and fail
+    // later, in the middle of a download". Measured on a board on 2026-09-09,
+    // that is simply untrue: the daemon answers **400 in 0.48 s** with
+    // `tpi-selfupdate: cannot fetch SHA256SUMS for v9.9.9`, before any
+    // download, and stages nothing.
+    //
+    // So the refusal protected against nothing and cost something real: the
+    // listing is a cache that can lag a release by half an hour, and
+    // `firmware check` reads a different cache with its own timing, so
+    // `check` would print "install it with: tpi firmware install <v>" and
+    // this resolution would reject the very command it printed. The board is
+    // the authority on what the board can fetch. Ask it.
+    let catalog = fork::catalog(request, client, false).await?;
+    let hits = matching(&catalog, args);
 
-    // The cached listing can be up to half an hour behind the sources, and
-    // `firmware check` reads a different cache with its own timing -- so
-    // `check` prints "install it with: tpi firmware install <v>" and this
-    // resolution refuses the very command it printed. Ask for a re-poll and
-    // WAIT for it before believing no source has the version. Only the path
-    // that was about to fail wrongly pays for the wait.
-    let mut polled = true;
-    if hits.is_empty() {
-        let before = catalog.checked_at.clone();
-        if !json {
-            println!(
-                "{} is not in the board's cached listing; asking it to re-poll its sources \
-                 (about a minute)",
-                args.target
-            );
-        }
-        // This starts the poll. It does NOT return its result -- see await_poll.
-        catalog = fork::catalog(request, client, true).await?;
-        (catalog, polled) = await_poll(request, client, &before, catalog).await?;
-        hits = matching(&catalog, args);
-    }
-
-    let (source, candidate) = match hits.len() {
-        0 if !polled => bail!(
-            "no source offers {}, but the board's re-poll did not finish within {} s, so that \
-             answer may be stale. Try `tpi firmware list --refresh --all`, then again.",
-            args.target,
-            POLL_WAIT.as_secs()
-        ),
-        0 => bail!(
-            "no source offers {}. `tpi firmware list --all` shows what this board can install",
-            args.target
-        ),
-        1 => {
-            let (si, ci) = hits[0];
-            (&catalog.sources[si], &catalog.sources[si].candidates[ci])
-        }
+    let resolved = match hits.len() {
+        0 => None,
+        1 => Some(hits[0]),
         _ => {
             let ids: Vec<&str> = hits
                 .iter()
@@ -396,25 +403,54 @@ pub async fn install(
         }
     };
 
-    if candidate.relation == Relation::Current && !args.force {
-        println!("{} is already running; nothing to do", candidate.version);
-        return Ok(0);
-    }
+    let (pairs, local, summary, staged_version) = if let Some((si, ci)) = resolved {
+        let source = &catalog.sources[si];
+        let candidate = &source.candidates[ci];
 
-    if !args.yes && !json {
+        if candidate.relation == Relation::Current && !args.force {
+            println!("{} is already running; nothing to do", candidate.version);
+            return Ok(0);
+        }
+
         let direction = match candidate.relation {
             Relation::Newer => "upgrade",
             Relation::Older => "DOWNGRADE",
             Relation::Current => "reinstall",
             Relation::Unknown => "install (not comparable with the running build)",
         };
-        println!(
-            "{direction} {} -> {} from {} ({})",
-            catalog.running,
-            candidate.version,
-            source.id,
-            candidate.trust.label()
-        );
+        (
+            install_request(source, candidate, args.force)?,
+            source.kind == Some(SourceKind::Local),
+            format!(
+                "{direction} {} -> {} from {} ({})",
+                catalog.running,
+                candidate.version,
+                source.id,
+                candidate.trust.label()
+            ),
+            candidate.version.clone(),
+        )
+    } else {
+        // Not in the listing. That is usually a cache older than the release,
+        // so say which source is being asked and let the board answer -- it
+        // rejects a version nobody has in under a second.
+        let source_id = blind_source(&catalog, args)?;
+        (
+            blind_request(&source_id, &args.target, args.force),
+            false,
+            format!(
+                "install {} from {} -- not in the board's cached listing (checked {}), \
+                 so the board is being asked directly",
+                args.target,
+                source_id,
+                age_phrase(catalog.age_seconds)
+            ),
+            args.target.clone(),
+        )
+    };
+
+    if !args.yes && !json {
+        println!("{summary}");
 
         if !std::io::stdin().is_terminal() {
             bail!("refusing to install without confirmation; pass --yes for a non-interactive run");
@@ -429,9 +465,6 @@ pub async fn install(
             return Ok(0);
         }
     }
-
-    let pairs = install_request(source, candidate, args.force)?;
-    let local = source.kind == Some(SourceKind::Local);
 
     let response = fork::set(
         request,
@@ -461,7 +494,7 @@ pub async fn install(
             .context("waiting for the flash to finish")?;
     }
 
-    println!("staged {}; reboot to take it", candidate.version);
+    println!("staged {staged_version}; reboot to take it");
     Ok(0)
 }
 
@@ -995,6 +1028,7 @@ mod tests {
         crate::fork::Catalog {
             refreshing: false,
             checked_at: String::new(),
+            age_seconds: 0,
             running: "v2.15.0".to_string(),
             sources,
         }
@@ -1038,41 +1072,69 @@ mod tests {
         );
     }
 
-    /// SQU-184, the second attempt. 1.5.0 asked for a re-poll and resolved
-    /// against the answer, which is the *cached* list -- the daemon spawns the
-    /// poll and returns at once. So the wait is the fix, and this is its
-    /// predicate: it must stay false until `checked_at` moves.
+    /// The refusal this used to make is gone, so what matters now is which
+    /// source gets asked when the listing cannot say.
     #[test]
-    fn a_poll_has_not_landed_until_checked_at_moves() {
-        let before = "2026-09-09T19:50:40Z";
-
-        assert!(
-            !poll_landed(before, before),
-            "the same timestamp means the poll is still running; \
-             treating it as landed is exactly the 1.5.0 bug"
-        );
-        assert!(poll_landed(before, "2026-09-09T19:59:43Z"));
+    fn an_explicit_source_wins() {
+        let cat = catalog_of(vec![source("fork", None), source("mirror", None)]);
+        let picked = blind_source(&cat, &install_args("v9.9.9", Some("mirror"))).expect("picks");
+        assert_eq!(picked, "mirror");
     }
 
-    /// A daemon that does not report `checked_at` gives nothing to watch, so
-    /// the wait must give up at once rather than burn the whole deadline.
+    /// With several to choose from, the one the running firmware came from is
+    /// the honest guess -- that is where this board's images have come from.
     #[test]
-    fn nothing_to_watch_is_not_a_landed_poll() {
-        assert!(!poll_landed("", ""));
-        assert!(!poll_landed("", "2026-09-09T19:59:43Z"));
+    fn the_running_firmwares_source_is_preferred() {
+        let mut fork_src = source("fork", None);
+        fork_src.candidates = vec![candidate("v2.15.0", None)];
+        let mut mirror = source("mirror", None);
+        mirror.candidates = vec![candidate("v2.1.0", None)];
+        let cat = catalog_of(vec![mirror, fork_src]);
+
+        let picked = blind_source(&cat, &install_args("v9.9.9", None)).expect("picks");
+        assert_eq!(picked, "fork", "v2.15.0 is what catalog_of says is running");
     }
 
-    /// The deadline is a measurement, not a guess: a poll over four sources
-    /// took 78 s on the board on 2026-09-09, against the 16 s
-    /// `firmware_catalog` claims. Anyone shrinking this below what the board
-    /// actually needs reintroduces the wrong refusal, silently.
+    /// A local source is never guessed at: a version absent from the listing
+    /// cannot be the file on the SD card, and the local endpoint needs a path
+    /// only the listing could give.
     #[test]
-    fn the_deadline_clears_the_measured_fan_out() {
-        assert!(
-            POLL_WAIT.as_secs() >= 120,
-            "measured 78 s over four sources; leave real headroom"
+    fn the_sd_card_is_never_guessed() {
+        let mut local = source("local", Some(SourceKind::Local));
+        local.candidates = vec![candidate("v2.15.0", Some("/mnt/sdcard/x.tpu"))];
+        let cat = catalog_of(vec![local, source("fork", None)]);
+
+        assert_eq!(
+            blind_source(&cat, &install_args("v9.9.9", None)).expect("picks"),
+            "fork"
         );
-        assert!(POLL_STEP < POLL_WAIT);
+    }
+
+    /// Ambiguity asks rather than guesses.
+    #[test]
+    fn several_candidates_for_the_guess_means_ask() {
+        let cat = catalog_of(vec![source("a", None), source("b", None)]);
+        let err = blind_source(&cat, &install_args("v9.9.9", None)).expect_err("refuses");
+        assert!(err.to_string().contains("--source"), "{err}");
+    }
+
+    /// The blind request is the remote form, never the local one.
+    #[test]
+    fn a_blind_request_never_uses_the_local_endpoint() {
+        let pairs = blind_request("fork", "v9.9.9", false);
+        assert!(pairs.contains(&("type", "firmware_install".to_string())));
+        assert!(pairs.iter().all(|(k, _)| *k != "local" && *k != "file"));
+        assert!(blind_request("fork", "v9.9.9", true).contains(&("force", "1".to_string())));
+    }
+
+    /// The bound has to clear a poll. Measured at 74 s, 78 s and 140 s on the
+    /// board; the old one was 60 s and gave up silently.
+    #[test]
+    fn the_refresh_bound_clears_a_measured_poll() {
+        assert!(
+            POLL_ATTEMPTS * POLL_STEP.as_secs() >= 200,
+            "polls have taken 140 s; leave headroom"
+        );
     }
 
     /// SQU-184: a stale catalogue made `firmware install` refuse the command

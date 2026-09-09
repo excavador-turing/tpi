@@ -160,6 +160,11 @@ pub struct Catalog {
     pub refreshing: bool,
     #[serde(default)]
     pub checked_at: String,
+    /// How long ago the daemon last polled the sources. It sends this; we
+    /// ignored it, which is why `firmware list` could print a listing half an
+    /// hour old and look exactly like a fresh one.
+    #[serde(default)]
+    pub age_seconds: u64,
     #[serde(default)]
     pub running: String,
     #[serde(default)]

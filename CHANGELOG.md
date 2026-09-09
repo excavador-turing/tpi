@@ -15,6 +15,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-09-10
+
+### Changed
+
+- **`firmware install` no longer resolves the version before posting it.** The
+  cached listing now informs the confirmation line; it cannot refuse.
+
+  The refusal existed because of a comment claiming the board "would accept a
+  source/version pair that offers nothing and fail later, in the middle of a
+  download". Measured on a board: the daemon answers **400 in 0.48 s** with
+  `tpi-selfupdate: cannot fetch SHA256SUMS for v9.9.9`, before any download,
+  staging nothing. The refusal protected against nothing.
+
+  It cost something real, though. The listing is a cache that lags a release by
+  up to half an hour, and `firmware check` reads a different cache with its own
+  timing, so `check` printed `install it with: tpi firmware install <v>` and
+  the next command rejected it. That is now impossible, because install has no
+  opinion to disagree with.
+
+  1.5.0 and 1.5.1 both tried to fix this by making the stale listing fresh —
+  1.5.0 inertly, 1.5.1 by waiting up to three minutes. Both were the wrong
+  shape. **The board is the authority on what the board can fetch.**
+
+  When the listing does not carry the version, the source is chosen in order:
+  `--source`; the source the running firmware came from; the only remote
+  source. A local source is never guessed — a version absent from the listing
+  cannot be the file on the SD card. Ambiguity asks.
+
+### Fixed
+
+- **`firmware list --refresh` could tell you a stale listing was current.** It
+  waited 30 attempts of 2 s, then gave up and printed the previous listing with
+  nothing said, indistinguishable from a fresh one. Polls timed on a board took
+  74 s, 78 s and 140 s, so a minute was short of even the ordinary case.
+
+  The bound is four minutes, it says so when it gives up, and it names the
+  timestamp of what it is showing.
+
+- **`firmware list` never showed how old the listing was.** It does now, on
+  every run, refreshed or not. The daemon had always sent the age; the client
+  discarded it.
+
 ## [1.5.1] — 2026-09-09
 
 ### Fixed
