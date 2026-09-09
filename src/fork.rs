@@ -200,7 +200,7 @@ pub struct Sources {
     pub sources: Vec<Source>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct UpdateCheck {
     #[serde(default)]
     pub running: String,
@@ -333,18 +333,55 @@ async fn unwrap_response(
     if !status.is_success() {
         // bmcd puts its refusal in the body; the status alone ("400 Bad
         // Request") is never the useful half.
+        //
+        // The refusal arrives in the same wrapper as a success --
+        // `{"response":[{"result":"the message"}]}` -- and reading `response`
+        // as a string missed that, so every refusal printed as raw JSON with
+        // the message buried and escaped inside it. Dig through the wrapper,
+        // and fall back to the whole body only when the shape is unfamiliar.
         let detail = body
             .get("response")
-            .and_then(|r| r.as_str())
+            .and_then(|r| r.as_array())
+            .and_then(|items| items.first())
+            .and_then(|first| first.get("result").or(Some(first)))
+            .and_then(|v| v.as_str())
             .map(str::to_owned)
+            .or_else(|| {
+                body.get("response")
+                    .and_then(|r| r.as_str())
+                    .map(str::to_owned)
+            })
             .unwrap_or_else(|| body.to_string());
         bail!("{what}: {detail}");
     }
 
-    Ok(body
-        .get("response")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null))
+    // The legacy API wraps an answer as `{"response":[{"result": ...}]}`, and
+    // it is the `result` a caller wants. Returning the array instead was a
+    // real bug and a quiet one: serde will deserialise a struct from a
+    // sequence, taking the elements as the fields in order, so `About` read
+    // the single `{"result": …}` map as its first field and failed with
+    // "invalid type: map, expected a string". Every fork command begins with
+    // the version gate, which reads `about`, so every one of them failed
+    // against a real board -- and none of them had been run against one.
+    //
+    // Not every endpoint uses the wrapper: the transfer endpoint answers with
+    // a bare `{"handle": N}`. So unwrap when the shape is there and pass the
+    // body through when it is not, rather than assuming either.
+    let Some(response) = body.get("response") else {
+        return Ok(body);
+    };
+
+    match response.as_array().and_then(|items| items.first()) {
+        Some(first) => Ok(first
+            .get("result")
+            .cloned()
+            // An entry with no `result` is the shape `opt=set` returns for a
+            // plain acknowledgement; hand back the entry rather than nothing.
+            .unwrap_or_else(|| first.clone())),
+        // `response` present but not an array of objects -- a refusal body,
+        // or a string acknowledgement.
+        None => Ok(response.clone()),
+    }
 }
 
 pub async fn about(request: &Request, client: &Client) -> Result<About> {
@@ -376,9 +413,34 @@ pub async fn sources(request: &Request, client: &Client) -> Result<Sources> {
     serde_json::from_value(v).context("parsing the firmware source list")
 }
 
+/// The stable channel's update check.
+///
+/// The daemon answers per channel -- `{checked_at, error, stable: {…}, edge:
+/// {…}}` -- and this used to deserialise the outer object straight into
+/// `UpdateCheck`, whose fields are all `#[serde(default)]`. So it "succeeded"
+/// with everything empty and `firmware check` printed " is current": a
+/// missing version rendered as a blank, and no error anywhere. `default` on
+/// every field is what turned a shape mismatch into silence.
+///
+/// Stable is the channel a board follows unless told otherwise; `edge` is
+/// read only to report it when the two disagree.
 pub async fn update_check(request: &Request, client: &Client) -> Result<UpdateCheck> {
     let v = get(request, client, &[("type", "update_check")]).await?;
-    serde_json::from_value(v).context("parsing the update check")
+
+    // A whole-request error sits outside the channels.
+    if let Some(error) = v.get("error").and_then(|e| e.as_str()) {
+        return Ok(UpdateCheck {
+            error: Some(error.to_string()),
+            ..Default::default()
+        });
+    }
+
+    let channel = v
+        .get("stable")
+        .or_else(|| v.get("edge"))
+        .ok_or_else(|| anyhow::anyhow!("the update check named no channel"))?;
+
+    serde_json::from_value(channel.clone()).context("parsing the update check")
 }
 
 #[cfg(test)]

@@ -15,6 +15,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-09-09
+
+Five bugs, all found by running the tool against a board for the first time.
+Every fork command was broken; none of them had ever been executed against
+real hardware, and the examples in the documentation had never been produced.
+
+### Fixed
+
+- **Every fork command failed with "invalid type: map, expected a string."**
+  `unwrap_response` returned `body["response"]` — the *array* — instead of the
+  `result` inside it. Serde will deserialise a struct from a sequence, taking
+  the elements as fields in order, so `About` read the single `{"result": …}`
+  map as its first `String` field. Every command begins with the version gate,
+  which reads `about`, so **every one of them failed**. The unwrapping now digs
+  through the wrapper and passes a bare body through unchanged, because the
+  transfer endpoint answers `{"handle": N}` with no wrapper at all.
+- **`firmware check` printed " is current"** with no version. The daemon
+  answers per channel — `{checked_at, error, stable: {…}, edge: {…}}` — and
+  this deserialised the *outer* object into a struct whose every field is
+  `#[serde(default)]`. So it "succeeded" with everything empty. `default` on
+  every field is what turned a shape mismatch into silence; it now reads the
+  stable channel and fails loudly if no channel is there.
+- **`thermal` printed raw JSON.** Its formatter expected an array of
+  `{name, temp}` in millidegrees — a shape the daemon has never sent. It now
+  renders the sensors with the trip that is governing the fan, and the fan's
+  step with the duty that step commands.
+- **Every refusal printed as raw JSON.** A refusal arrives in the same wrapper
+  as a success, and the error path read `response` as a string, so the message
+  came out buried and escaped inside `{"response":[{"result":"…"}]}`.
+- **`firmware list --all` panicked.** `-a` was claimed by both `--all` and the
+  global `--api-version`, which clap's own debug assertion catches by
+  panicking. `--all` is long-only now.
+
+### Changed
+
+- The rename warning prints **after** the board accepts. Printed first, it
+  announced a rename that the next line then refused, and a warning about a
+  consequence that did not happen is worse than no warning.
+
 ## [1.2.0] — 2026-09-09
 
 ### Added
@@ -112,7 +151,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   accessible by integration" while clippy itself reported no warnings.
 - Releases are cut by a version tag rather than a push to the default branch.
 
-[Unreleased]: https://github.com/excavador-turing/tpi/compare/v1.2.0...hive
+[Unreleased]: https://github.com/excavador-turing/tpi/compare/v1.2.1...hive
+[1.2.1]: https://github.com/excavador-turing/tpi/releases/tag/v1.2.1
 [1.2.0]: https://github.com/excavador-turing/tpi/releases/tag/v1.2.0
 [1.1.1]: https://github.com/excavador-turing/tpi/releases/tag/v1.1.1
 [1.1.0]: https://github.com/excavador-turing/tpi/releases/tag/v1.1.0

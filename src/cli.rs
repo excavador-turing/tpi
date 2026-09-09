@@ -303,7 +303,11 @@ pub struct ListArgs {
     pub refresh: bool,
     /// Include versions that are older than, or unrelated to, the running
     /// one. The default listing is what you could move TO.
-    #[arg(short, long)]
+    ///
+    /// Long-only: `-a` is already the global `--api-version`, and clap's own
+    /// debug assertion catches the clash by panicking -- which is how this
+    /// was found, because `firmware list --all` had never been run.
+    #[arg(long)]
     pub all: bool,
 }
 

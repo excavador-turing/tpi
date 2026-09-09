@@ -532,22 +532,91 @@ pub async fn thermal(request: &Request, client: &Client, json: bool) -> Result<u
         return emit_json(&value).map(|_| 0);
     }
 
-    match &value {
-        serde_json::Value::Array(items) => {
-            for item in items {
-                let name = item
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("sensor");
-                let temp = item.get("temp").and_then(|v| v.as_f64());
-                match temp {
-                    // bmcd reports millidegrees, as the kernel does.
-                    Some(t) => println!("{name:<12} {:.1} C", t / 1000.0),
-                    None => println!("{name:<12} unknown"),
-                }
+    // `{"sensors":[…],"cooling":[…]}`. This used to expect an array of
+    // `{name, temp}` in millidegrees -- a shape the daemon has never sent --
+    // and printed the raw JSON instead. It was never noticed because the
+    // response unwrapping was broken too, so no fork command reached its
+    // formatter at all.
+    let sensors = value
+        .get("sensors")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let cooling = value
+        .get("cooling")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if sensors.is_empty() && cooling.is_empty() {
+        // A v2.4 board has no fan, and an image without the sensor in its
+        // device tree has no zone. That is a fact about the board, not a
+        // failure, and it is different from a reading of zero.
+        println!("this board reports no temperature sensors and no fan");
+        return Ok(0);
+    }
+
+    for sensor in &sensors {
+        let name = sensor
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sensor");
+        let Some(celsius) = sensor.get("temperature_c").and_then(|v| v.as_f64()) else {
+            println!("{name:<14} could not be read");
+            continue;
+        };
+        println!("{name:<14} {celsius:.1} C");
+
+        // The governor is step_wise, so the fan's step follows the highest
+        // `active` trip the board is above. Printing the trips without saying
+        // which one is in force would leave the reader to work it out.
+        let mut governing: Option<f64> = None;
+        for trip in sensor
+            .get("trips")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&vec![])
+        {
+            if trip.get("kind").and_then(|v| v.as_str()) != Some("active") {
+                continue;
+            }
+            let Some(at) = trip.get("temperature_c").and_then(|v| v.as_f64()) else {
+                continue;
+            };
+            if celsius >= at && governing.is_none_or(|best| at > best) {
+                governing = Some(at);
             }
         }
-        other => println!("{other}"),
+        match governing {
+            Some(at) => println!("{:<14} above the {at:.0} C trip", ""),
+            None => println!("{:<14} below every trip", ""),
+        }
+    }
+
+    for cooler in &cooling {
+        let name = cooler.get("name").and_then(|v| v.as_str()).unwrap_or("fan");
+        let cur = cooler.get("cur_state").and_then(|v| v.as_u64());
+        let max = cooler.get("max_state").and_then(|v| v.as_u64());
+        match (cur, max) {
+            (Some(cur), Some(max)) => {
+                // Steps are an index, not a percentage: 4 of 6 is the fifth
+                // of seven settings. The duty is what that step commands, out
+                // of the top step's duty -- read from the board's own table,
+                // because it is not linear.
+                let duty = cooler
+                    .get("levels")
+                    .and_then(|v| v.as_array())
+                    .and_then(|levels| levels.get(cur as usize))
+                    .and_then(|v| v.as_u64())
+                    .zip(cooler.get("max_level").and_then(|v| v.as_u64()))
+                    .filter(|(_, top)| *top > 0)
+                    .map(|(at, top)| (at as f64 / top as f64) * 100.0);
+                match duty {
+                    Some(pct) => println!("{name:<14} step {cur} of {max}  ({pct:.0}% duty)"),
+                    None => println!("{name:<14} step {cur} of {max}"),
+                }
+            }
+            _ => println!("{name:<14} could not be read"),
+        }
     }
 
     Ok(0)
@@ -619,19 +688,21 @@ pub async fn hostname_cmd(
         return Ok(0);
     };
 
-    // Said before it happens, not after: the series break is the part nobody
-    // expects, and it is not undone by renaming the board back.
-    if !json {
-        println!(
-            "renaming to {name}. The metrics `instance` label changes with it,              so a Prometheus history will not follow the board across the rename."
-        );
-    }
-
     let value = fork::set(request, client, &[("type", "hostname"), ("name", name)]).await?;
     if json {
         return emit_json(&value).map(|_| 0);
     }
+
+    // Said after the board has accepted, not before. Printed first, it
+    // announced a rename that the very next line then refused -- and a
+    // warning about a consequence that did not happen is worse than no
+    // warning. The consequence is still the point: by the time this prints
+    // the series has already split, and renaming back does not rejoin it.
     println!("renamed to {name}");
+    println!(
+        "the metrics `instance` label changed with it, so a Prometheus history \
+         will not follow this board across the rename"
+    );
     Ok(0)
 }
 
