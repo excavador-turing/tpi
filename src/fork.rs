@@ -155,6 +155,10 @@ pub struct SourceCatalog {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Catalog {
+    /// The previous answers, with a re-poll running behind them. Absent from
+    /// a settled catalogue and from any daemon older than 2.11.0.
+    #[serde(default)]
+    pub refreshing: bool,
     #[serde(default)]
     pub checked_at: String,
     #[serde(default)]

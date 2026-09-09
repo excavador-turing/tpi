@@ -314,7 +314,15 @@ pub struct ListArgs {
 #[derive(Args, Clone)]
 pub struct InstallArgs {
     /// A version from `tpi firmware list`, e.g. v2.8.0
-    pub version: String,
+    /// The version to install, as `firmware list` shows it.
+    ///
+    /// Named `target` inside because `version` collides with the `--version`
+    /// flag clap generates for every subcommand -- a collision clap's debug
+    /// assertion reports by panicking, and a release build resolves by
+    /// undefined argument handling. `firmware install` had never worked in
+    /// any release because of it.
+    #[arg(value_name = "VERSION")]
+    pub target: String,
     /// Which source to take it from. Only needed when more than one offers
     /// the same version.
     #[arg(short, long)]

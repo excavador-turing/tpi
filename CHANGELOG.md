@@ -15,6 +15,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.2] — 2026-09-09
+
+### Fixed
+
+- **`firmware install <version>` had never worked in any release.** The
+  positional was named `version`, and the `--version` flag clap generates for
+  every subcommand has the same id. clap's debug assertion reports the
+  collision by panicking; a release build skips the assertion and gets
+  undefined argument handling instead. Every install this fork ever performed
+  went through the web interface, `curl`, or the on-board updater. Found by
+  using the command as the flash tool for v2.9.2 — which is what it exists for
+  — and verified by doing exactly that: the install went through the transfer
+  endpoint, the board staged it, `firmware list` said so, and the reboot
+  promoted it.
+- **`firmware list --refresh` printed the previous list.** The daemon answers
+  a refresh at once and re-polls the sources behind itself (bmcd 2.11.0). That
+  is right for a page, which draws a spinner, and wrong for a shell command
+  that asked for a fresh answer. It now waits for the daemon to finish,
+  bounded at a minute, and says *polling the sources…* on stderr so the wait is
+  not mistaken for a hang.
+
 ## [1.2.1] — 2026-09-09
 
 Five bugs, all found by running the tool against a board for the first time.
@@ -151,7 +172,8 @@ real hardware, and the examples in the documentation had never been produced.
   accessible by integration" while clippy itself reported no warnings.
 - Releases are cut by a version tag rather than a push to the default branch.
 
-[Unreleased]: https://github.com/excavador-turing/tpi/compare/v1.2.1...hive
+[Unreleased]: https://github.com/excavador-turing/tpi/compare/v1.2.2...hive
+[1.2.2]: https://github.com/excavador-turing/tpi/releases/tag/v1.2.2
 [1.2.1]: https://github.com/excavador-turing/tpi/releases/tag/v1.2.1
 [1.2.0]: https://github.com/excavador-turing/tpi/releases/tag/v1.2.0
 [1.1.1]: https://github.com/excavador-turing/tpi/releases/tag/v1.1.1

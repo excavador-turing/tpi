@@ -62,7 +62,23 @@ fn emit_json<T: serde::Serialize>(value: &T) -> Result<()> {
 
 pub async fn list(request: &Request, client: &Client, args: &ListArgs, json: bool) -> Result<u8> {
     gate(request, client, "firmware list", SINCE_FIRMWARE_CATALOGUE).await?;
-    let catalog = fork::catalog(request, client, args.refresh).await?;
+    let mut catalog = fork::catalog(request, client, args.refresh).await?;
+
+    // The daemon answers a refresh at once and re-polls the sources behind
+    // itself. Right for a page, which draws a spinner; wrong for a shell
+    // command that asked for a fresh answer and would otherwise print the
+    // previous one. Wait for it, bounded, and say so on stderr so the wait is
+    // not mistaken for a hang.
+    if args.refresh && catalog.refreshing {
+        eprintln!("polling the sources...");
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            catalog = fork::catalog(request, client, false).await?;
+            if !catalog.refreshing {
+                break;
+            }
+        }
+    }
 
     if json {
         println!(
@@ -252,8 +268,8 @@ pub async fn install(
             }
         }
         for c in &s.candidates {
-            if c.version == args.version
-                || c.version.trim_start_matches('v') == args.version.trim_start_matches('v')
+            if c.version == args.target
+                || c.version.trim_start_matches('v') == args.target.trim_start_matches('v')
             {
                 matches.push((s, c));
             }
@@ -263,14 +279,14 @@ pub async fn install(
     let (source, candidate) = match matches.len() {
         0 => bail!(
             "no source offers {}. `tpi firmware list --all` shows what this board can install",
-            args.version
+            args.target
         ),
         1 => matches[0],
         _ => {
             let ids: Vec<&str> = matches.iter().map(|(s, _)| s.id.as_str()).collect();
             bail!(
                 "{} is offered by several sources ({}); choose one with --source",
-                args.version,
+                args.target,
                 ids.join(", ")
             )
         }
