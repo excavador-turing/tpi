@@ -15,6 +15,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-09-11
+
+### Fixed
+
+- **Renaming a board does not move its metrics history, and the tool stops
+  saying it does** (SQU-191). `tpi hostname <name>` told the operator, on
+  success and in `--help`, that the metrics `instance` label changed with the
+  rename and that a Prometheus history would not follow the board across it.
+
+  Measured on a board rather than reasoned about: the daemon's exposition is
+  190 lines with **zero** occurrences of `instance` or `hostname`, and the
+  board's own name appears nowhere in it. The labels it emits are `device`,
+  `kind`, `name`, `node`, `port`, `result`, `sensor`, `slot`, `state`,
+  `version` and `volume`. `instance` is assigned by whatever scrapes the
+  board.
+
+  So renaming moves nothing, and editing the scrape label moves everything.
+  The warning was written from a worry rather than from what the daemon emits,
+  and it survived a real rename of two boards without anyone checking.
+
+
 ## [1.6.0] — 2026-09-10
 
 ### Changed
