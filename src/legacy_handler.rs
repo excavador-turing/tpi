@@ -104,6 +104,18 @@ impl LegacyHandler {
             Commands::Thermal => {
                 return fork_cmd::thermal(&self.request, &self.client, self.json).await
             }
+            Commands::Health => {
+                return fork_cmd::health(&self.request, &self.client, self.json).await
+            }
+            Commands::Sdcard(args) => {
+                return fork_cmd::sdcard(
+                    &self.request,
+                    &self.client,
+                    args.path.as_deref(),
+                    self.json,
+                )
+                .await
+            }
             Commands::Hostname(args) => {
                 return fork_cmd::hostname_cmd(&self.request, &self.client, args, self.json).await
             }
@@ -161,6 +173,8 @@ impl LegacyHandler {
             // first match, so they are named rather than caught by a `_`
             // arm that would also swallow a genuinely new command.
             Commands::About
+            | Commands::Health
+            | Commands::Sdcard(_)
             | Commands::Thermal
             | Commands::Hostname(_)
             | Commands::Ntp(_)
@@ -782,8 +796,16 @@ fn print_power_status_nodes(map: &serde_json::Value) -> anyhow::Result<()> {
         .context("response parse error")?;
 
     for (key, value) in results {
-        let number = value.as_str().context("API error")?.parse::<u8>()?;
-        let status = if number == 1 { "On" } else { "off" };
+        // The daemon answers "1", "0", or "Unknown" for a rail it could not
+        // read -- its own schema says so. Parsing straight to a number turned
+        // that third case into `invalid digit found in string` and a raw JSON
+        // dump, on exactly the board you would be running this against.
+        let raw = value.as_str().context("API error")?;
+        let status = match raw {
+            "1" => "On",
+            "0" => "off",
+            other => other,
+        };
         println!("{}: {}", key, status);
     }
 

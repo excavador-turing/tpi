@@ -51,6 +51,10 @@ pub const SINCE_THERMAL: &str = "2.5.0";
 pub const SINCE_HOSTNAME: &str = "2.13.0";
 pub const SINCE_NTP: &str = "2.13.0";
 pub const SINCE_CONFIG: &str = "2.14.0";
+/// `health` has been in the daemon since 2.15.0.
+pub const SINCE_HEALTH: &str = "2.15.0";
+/// The microSD listing arrived with 2.34.0.
+pub const SINCE_SDCARD_FILES: &str = "2.34.0";
 
 /// What the board says about itself.
 #[derive(Debug, Clone, Deserialize)]

@@ -117,6 +117,12 @@ pub enum Commands {
     /// Board temperatures
     Thermal,
 
+    /// Uptime, load, memory, NAND wear and the state of the clock
+    Health,
+
+    /// What is on the microSD card, and which of it can be flashed to a node
+    Sdcard(SdcardArgs),
+
     /// The board's name, as `about` reports it and mDNS advertises it
     Hostname(HostnameArgs),
 
@@ -130,7 +136,16 @@ pub enum Commands {
     /// Print turing-pi info
     Info,
 
-    /// Reboot the BMC chip. Nodes will lose power until booted!
+    /// Reboot the BMC. The compute modules keep running throughout.
+    ///
+    /// Only this interface, the API and the consoles go away, for about half
+    /// a minute. The daemon's own summary says the same thing, and it has
+    /// been measured on every firmware flash this estate has done: all four
+    /// modules stayed powered and their Kubernetes nodes never restarted.
+    ///
+    /// This help used to say the nodes would lose power. They do not, and a
+    /// warning that overstates the blast radius talks people out of a reboot
+    /// they should do.
     Reboot,
 }
 
@@ -495,4 +510,14 @@ pub struct CoolingArgs {
 pub enum CoolingCmd {
     Set,
     Status,
+}
+
+/// `tpi sdcard` — what is on the card.
+#[derive(Args, Debug)]
+pub struct SdcardArgs {
+    /// A directory on the card, relative to its root. Defaults to the root.
+    ///
+    /// Always relative and always confined to the card: the daemon refuses
+    /// anything that resolves outside it, symlinks included.
+    pub path: Option<String>,
 }

@@ -998,6 +998,201 @@ pub async fn config_cmd(
         }
     }
 }
+/// `tpi health` -- what the board says about itself.
+///
+/// Uptime, load, memory, NAND wear and whether the clock is actually
+/// disciplined. Every field is optional on the daemon's side, so an older
+/// board produces a shorter table rather than an error; printing "unknown"
+/// for something the board never claimed would be inventing a reading.
+pub async fn health(request: &Request, client: &Client, json: bool) -> Result<u8> {
+    gate(request, client, "health", fork::SINCE_HEALTH).await?;
+    let value = fork::get(request, client, &[("type", "health")]).await?;
+
+    if json {
+        return emit_json(&value).map(|_| 0);
+    }
+
+    let row = |label: &str, v: Option<String>| {
+        if let Some(v) = v {
+            println!("{label:<22} {v}");
+        }
+    };
+
+    let n = |k: &str| value.get(k).and_then(serde_json::Value::as_f64);
+
+    row(
+        "uptime",
+        n("uptime_seconds").map(|v| format_seconds(v as u64)),
+    );
+
+    // `load` is an object with the three windows, not a bare number. Read off
+    // the board rather than guessed: a key that does not exist reads as absent
+    // and prints nothing, which would have hidden this silently.
+    if let Some(load) = value.get("load") {
+        let l = |k: &str| load.get(k).and_then(serde_json::Value::as_f64);
+        if let (Some(a), Some(b), Some(c)) =
+            (l("one_minute"), l("five_minutes"), l("fifteen_minutes"))
+        {
+            println!("{:<22} {a:.2}  {b:.2}  {c:.2}", "load 1/5/15m");
+        }
+    }
+
+    if let Some(mem) = value.get("memory") {
+        let m = |k: &str| mem.get(k).and_then(|v| v.as_f64());
+        if let (Some(total), Some(avail)) = (m("total_bytes"), m("available_bytes")) {
+            println!(
+                "{:<22} {} of {} available",
+                "memory",
+                format_bytes(avail as u64),
+                format_bytes(total as u64)
+            );
+        }
+        row(
+            "  daemon resident",
+            m("self_resident_bytes").map(|v| format_bytes(v as u64)),
+        );
+    }
+
+    if let Some(nand) = value.get("nand") {
+        let m = |k: &str| nand.get(k).and_then(serde_json::Value::as_f64);
+        // `available_eraseblocks`, not `free_*`. Five of them is the real
+        // number on these boards, which is why nothing large is ever written
+        // to the overlay.
+        if let (Some(avail), Some(bad)) = (m("available_eraseblocks"), m("bad_eraseblocks")) {
+            println!(
+                "{:<22} {} eraseblocks available, {} bad",
+                "nand", avail as u64, bad as u64
+            );
+        }
+    }
+
+    if let Some(clock) = value.get("clock") {
+        let synced = clock
+            .get("synchronised")
+            .and_then(serde_json::Value::as_bool);
+        let source = clock
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("no source");
+        // The distinction worth printing: a board can have time and not be
+        // disciplined to anything, which is how a certificate looks expired
+        // and a log looks out of order.
+        println!(
+            "{:<22} {}",
+            "clock",
+            match synced {
+                Some(true) => format!("synchronised to {source}"),
+                Some(false) => format!("NOT synchronised ({source})"),
+                None => "state not reported".to_string(),
+            }
+        );
+        if let Some(offset) = clock
+            .get("offset_seconds")
+            .and_then(serde_json::Value::as_f64)
+        {
+            println!("{:<22} {:.3} ms", "  offset", offset * 1000.0);
+        }
+    }
+
+    Ok(0)
+}
+
+/// `tpi sdcard [path]` -- what is on the card, and what can be written to a
+/// module.
+///
+/// The companion to `tpi flash --local`, which until now required the operator
+/// to know a path and type it correctly for the most destructive thing this
+/// board does.
+pub async fn sdcard(
+    request: &Request,
+    client: &Client,
+    path: Option<&str>,
+    json: bool,
+) -> Result<u8> {
+    gate(request, client, "sdcard", fork::SINCE_SDCARD_FILES).await?;
+
+    let mut params: Vec<(&str, &str)> = vec![("type", "sdcard_files")];
+    if let Some(p) = path {
+        params.push(("path", p));
+    }
+    let value = fork::get(request, client, &params).await?;
+
+    if json {
+        return emit_json(&value).map(|_| 0);
+    }
+
+    let Some(entries) = value.as_array() else {
+        println!("the board did not return a listing");
+        return Ok(1);
+    };
+
+    if entries.is_empty() {
+        println!("nothing here");
+        return Ok(0);
+    }
+
+    for e in entries {
+        let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let dir = e
+            .get("directory")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let size = e
+            .get("size")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let flashable = e
+            .get("flashable")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let reason = e.get("reason").and_then(|v| v.as_str());
+
+        if dir {
+            println!("  {:<44} {:>10}  directory", format!("{name}/"), "");
+        } else {
+            // A non-candidate is shown WITH its reason, not hidden. Somebody
+            // who cannot see the file they just copied concludes the tool is
+            // broken, not that the file was too small.
+            let note = if flashable {
+                "flashable".to_string()
+            } else {
+                reason.unwrap_or("not an OS image").to_string()
+            };
+            println!("  {name:<44} {:>10}  {note}", format_bytes(size));
+        }
+    }
+
+    Ok(0)
+}
+
+/// Bytes, at one decimal, in the unit a person would use.
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Seconds as days/hours/minutes, dropping the parts that are zero.
+fn format_seconds(seconds: u64) -> String {
+    let d = seconds / 86_400;
+    let h = (seconds % 86_400) / 3_600;
+    let m = (seconds % 3_600) / 60;
+    match (d, h, m) {
+        (0, 0, m) => format!("{m}m"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

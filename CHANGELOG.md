@@ -15,6 +15,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-09-11
+
+### Fixed
+
+- **`tpi reboot --help` said the compute modules lose power. They do not.**
+  The daemon's own summary says the opposite, and every firmware flash this
+  estate has done measured it: all four modules stayed powered and their
+  Kubernetes nodes never restarted. A warning that overstates the blast radius
+  talks people out of a reboot they should do (SQU-200).
+
+- **`tpi power status` broke on a rail the board could not read.** The daemon
+  answers `"Unknown"` as a third value — its own schema says so — and the
+  printer parsed straight to a number, so such a board produced
+  `invalid digit found in string` and a raw JSON dump. That is exactly the
+  board you would be running this against.
+
+### Added
+
+- **`tpi health`** — uptime, load across the three windows, memory including
+  the daemon's own resident set, NAND eraseblocks available and bad, and
+  whether the clock is *actually* disciplined rather than merely configured,
+  with its offset.
+
+- **`tpi sdcard [path]`** — what is on the microSD card and what can be
+  written to a module. The companion to `tpi flash --local`, which until now
+  required the operator to know a path and type it correctly for the most
+  destructive thing this board does. A non-candidate is listed **with its
+  reason** rather than hidden: a `.tpu` says it is BMC firmware and belongs on
+  the firmware page.
+
+  Every field was read off a board rather than assumed — the first draft used
+  `load1` and `free_eraseblocks`, neither of which the daemon sends, and an
+  absent key prints nothing, so the mistake would have been silent.
+
+
 ## [1.7.0] — 2026-09-11
 
 ### Fixed
