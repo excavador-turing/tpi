@@ -812,16 +812,17 @@ pub async fn hostname_cmd(
         return emit_json(&value).map(|_| 0);
     }
 
-    // Said after the board has accepted, not before. Printed first, it
-    // announced a rename that the very next line then refused -- and a
-    // warning about a consequence that did not happen is worse than no
-    // warning. The consequence is still the point: by the time this prints
-    // the series has already split, and renaming back does not rejoin it.
+    // This used to warn that the rename split the board's metrics history.
+    // It does not: bmcd's exposition carries no `instance` and no `hostname`
+    // label -- measured on a board, 190 lines, the name appears nowhere.
+    // `instance` is assigned by whatever scrapes it, so renaming the board
+    // moves nothing and editing the scrape config moves everything.
+    //
+    // A confident, specific warning that is false is worse than none. It
+    // makes an operator hesitate over a rename that is safe, and worse, it
+    // implies the inverse -- that leaving the name alone protects the
+    // history -- when the scrape config is the only thing that decides.
     println!("renamed to {name}");
-    println!(
-        "the metrics `instance` label changed with it, so a Prometheus history \
-         will not follow this board across the rename"
-    );
     Ok(0)
 }
 

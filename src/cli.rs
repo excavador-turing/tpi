@@ -380,9 +380,11 @@ pub enum SourceKindArg {
 pub struct HostnameArgs {
     /// The new name. Omit to print the current one.
     ///
-    /// One DNS label: letters, digits and hyphens, and no dots. Changing it
-    /// moves the `instance` label on every metrics series, so a Prometheus
-    /// history does not follow the board across the rename.
+    /// One DNS label: letters, digits and hyphens, and no dots.
+    ///
+    /// The board's name does not appear in its metrics, so renaming it moves
+    /// no history. If your scraper labels targets by hostname, that is where
+    /// to change it.
     pub name: Option<String>,
 }
 
