@@ -15,6 +15,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **A refusal in `application/problem+json` prints its sentence**, not the
+  whole object. Every path on the fork's own endpoints refuses in that shape
+  and puts the message in `detail`; this read only the legacy wrapper, so a
+  perfectly clear refusal came out as escaped JSON and read like a parser
+  error.
+
+- **A board still on its factory password says so in its own words.** It
+  refuses almost every call, and the bare refusal read as a permissions
+  problem with whatever was asked for. It is not — it is a board that has not
+  been set up — so it gets its own message, with the one thing that fixes it.
+
+  Recognised by the problem document's title, never by the status: 403 is also
+  what a wrong password and a refused switch confirmation answer, and matching
+  on the status would have told somebody confirming a switch change from the
+  board's console to go and change their password.
+
 ### Added
 
 - **`tpi network switch show --table`** — the running document alone, as JSON,
