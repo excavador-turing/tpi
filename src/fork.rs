@@ -330,6 +330,20 @@ fn label_of<'a>(pairs: &[(&'a str, &'a str)]) -> &'a str {
         .unwrap_or("request")
 }
 
+/// Whether a board's answer means "this daemon has not got that path".
+///
+/// Two ways it can. A future daemon may route these paths and answer 404.
+/// Today's does not: bmcd serves the web interface from the same listener and
+/// falls back to `index.html` for anything it does not route, including an
+/// unmatched path inside `/api/bmc`, so an older board answers **200 with a
+/// page of HTML** and the only symptom is JSON that will not parse.
+///
+/// Both count. Narrowing this to the status would make the command fail with
+/// a page of markup quoted at the operator instead of one sentence.
+fn endpoint_is_absent(status: reqwest::StatusCode, parsed_ok: bool) -> bool {
+    status == reqwest::StatusCode::NOT_FOUND || !parsed_ok
+}
+
 /// One call against a path of the fork's own, rather than the legacy
 /// `opt=`/`type=` dispatcher.
 ///
@@ -365,16 +379,31 @@ async fn unwrap(
     let resp = req.send(client.clone()).await?;
     let status = resp.status();
 
-    if let (Some(path), reqwest::StatusCode::NOT_FOUND) = (path, status) {
-        bail!(
-            "{what}: this board's daemon has no {path}. That endpoint arrived in a later \
-             release -- `tpi firmware check` will say whether one is available."
-        );
-    }
-
     let bytes = resp.bytes().await?;
 
-    let body: serde_json::Value = serde_json::from_slice(&bytes).with_context(|| {
+    let parsed: Result<serde_json::Value, _> = serde_json::from_slice(&bytes);
+
+    // A BOARD TOO OLD FOR ONE OF THE FORK'S PATHS DOES NOT ANSWER 404.
+    //
+    // bmcd serves the web interface from the same listener and falls back to
+    // `index.html` for anything it does not route -- including an unmatched
+    // path inside `/api/bmc`, because the scope has no default service of its
+    // own. So the board answers **200 with a page of HTML**, and the only
+    // symptom is JSON that will not parse.
+    //
+    // Both are checked. The status, because a future daemon may route these
+    // paths properly and answer 404; the parse, because today's does not.
+    // Either way the honest reading is the same: this board has not got it.
+    if let Some(path) = path {
+        if endpoint_is_absent(status, parsed.is_ok()) {
+            bail!(
+                "{what}: this board's daemon has no {path}. That endpoint arrived in a \
+                 later release -- `tpi firmware check` will say whether one is available."
+            );
+        }
+    }
+
+    let body: serde_json::Value = parsed.with_context(|| {
         format!(
             "{what}: {} returned something that is not JSON:\n{}",
             status,
@@ -566,5 +595,27 @@ mod tests {
     #[test]
     fn a_board_with_no_version_is_refused() {
         assert!(require(&board(""), "firmware list", SINCE_FIRMWARE_CATALOGUE).is_err());
+    }
+
+    /// The case that actually happens. An older board answers a path it does
+    /// not route with 200 and the web interface's own index page, because
+    /// bmcd serves both from one listener and falls back to `index.html`.
+    /// Read as a status alone, that is a success carrying markup.
+    #[test]
+    fn a_page_of_html_with_a_200_means_the_daemon_has_not_got_it() {
+        assert!(endpoint_is_absent(reqwest::StatusCode::OK, false));
+    }
+
+    /// And the case a later daemon may produce instead.
+    #[test]
+    fn a_404_means_the_same_thing() {
+        assert!(endpoint_is_absent(reqwest::StatusCode::NOT_FOUND, true));
+    }
+
+    /// A refusal is not an absence. The board understood the request and said
+    /// no, in JSON, with a reason worth printing.
+    #[test]
+    fn a_json_refusal_is_not_an_absent_endpoint() {
+        assert!(!endpoint_is_absent(reqwest::StatusCode::BAD_REQUEST, true));
     }
 }

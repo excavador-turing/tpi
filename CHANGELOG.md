@@ -41,9 +41,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   audit log in full, so a private key sent that way would be recorded in clear
   on the board.
 
-  A board whose daemon is too old answers `404`, and that is reported as an
-  old daemon rather than as "not found" — there is no version gate, because
-  the board's own answer costs nothing and cannot be wrong about itself.
+  A board whose daemon is too old is reported as an old daemon rather than
+  with whatever it happened to answer. There is no version gate, because the
+  board's own answer costs nothing and cannot be wrong about the board.
+
+  Two answers mean the same thing, and both are handled. A later daemon may
+  route these paths and reply `404`; today's does not — bmcd serves the web
+  interface from the same listener and falls back to `index.html` for anything
+  it does not route, so an older board replies **200 with a page of HTML** and
+  the only symptom is JSON that will not parse. Reading the status alone would
+  quote a page of markup at you instead of one sentence.
 
 ## [1.8.0] — 2026-09-11
 
