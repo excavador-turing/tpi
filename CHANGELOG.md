@@ -15,6 +15,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`tpi tls show`, `tpi tls install --cert --key` and `tpi tls reset`.** The
+  certificate the board serves over HTTPS, readable and replaceable from the
+  command line. For anyone running their own CA who wants a board a browser
+  opens without a warning — and a serial console that works, since a
+  click-through exception does not cover the console's WebSocket.
+
+  `show` prints the subject, issuer, validity, key type, the names the
+  certificate asserts and its fingerprint. It says in words whether the board
+  issued the certificate, and therefore renews it, or whether somebody
+  installed one and renewal is now their job.
+
+  `install` reads both files and checks their shape before contacting the
+  board: `--cert` and `--key` swapped, or one file holding both halves. The
+  board validates properly and refuses before writing anything; this is about
+  the message. A combined file is refused outright, because sending it would
+  put the private key in the field the board treats as public.
+
+  `reset` removes an installed certificate and has the board issue its own.
+
+  These are the only commands that do not go through the legacy dispatcher.
+  That is the daemon's decision: it writes every mutating legacy query to the
+  audit log in full, so a private key sent that way would be recorded in clear
+  on the board.
+
+  A board whose daemon is too old answers `404`, and that is reported as an
+  old daemon rather than as "not found" — there is no version gate, because
+  the board's own answer costs nothing and cannot be wrong about itself.
+
 ## [1.8.0] — 2026-09-11
 
 ### Fixed

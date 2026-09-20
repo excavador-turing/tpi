@@ -22,11 +22,11 @@
 use std::io::{IsTerminal, Write};
 
 use anyhow::{bail, Context, Result};
-use reqwest::Client;
+use reqwest::{Client, Method};
 
 use crate::cli::{
     ConfigCmd, HostnameArgs, InstallArgs, ListArgs, NtpCmd, SourceAddArgs, SourceKindArg,
-    SourcesCmd,
+    SourcesCmd, TlsCmd,
 };
 use crate::fork::{
     self, About, Relation, Source, SourceKind, Sources, SINCE_CONFIG, SINCE_FIRMWARE_CATALOGUE,
@@ -1440,5 +1440,179 @@ mod tests {
         let message = format!("{err}");
         assert!(message.contains("v2.8.1-rc1"), "{message}");
         assert!(message.contains("local"), "{message}");
+    }
+}
+
+/// The two mistakes worth catching before a round-trip: the files swapped,
+/// and one file holding both halves.
+///
+/// Not validation -- the board does that properly, and refuses before it
+/// writes anything. This is about the message. A swapped pair rejected by the
+/// board says "not a PEM private key", which is true and unhelpful when the
+/// real problem is that `--cert` and `--key` are the wrong way round.
+///
+/// A certificate file that also holds the key is the more dangerous one: it
+/// is what `openssl req` writes when told to put both in one place, and
+/// sending it would put the private key in a field the board treats as public
+/// and echoes back in `GET`.
+fn check_pem_shapes(cert: &str, key: &str, cert_path: &str, key_path: &str) -> Result<()> {
+    if !cert.contains("BEGIN CERTIFICATE") {
+        bail!(
+            "{cert_path} does not look like a PEM certificate. If you passed a DER or \
+             PKCS#12 file, convert it first."
+        );
+    }
+    if cert.contains("PRIVATE KEY") {
+        bail!(
+            "{cert_path} contains a private key as well as a certificate. Split them: \
+             the key goes to --key, and only the key."
+        );
+    }
+    if !key.contains("PRIVATE KEY") {
+        bail!("{key_path} does not look like a PEM private key.");
+    }
+    Ok(())
+}
+
+/// `tpi tls show | install | reset` -- the certificate the board serves.
+///
+/// These are the one family of commands that do not go through the legacy
+/// dispatcher, and that is the daemon's decision rather than a preference:
+/// it writes every mutating legacy query to the audit log in full, so a
+/// private key in one would be recorded in clear on the board.
+pub async fn tls_cmd(request: &Request, client: &Client, cmd: &TlsCmd, json: bool) -> Result<u8> {
+    const PATH: &str = "tls/certificate";
+
+    let value = match cmd {
+        TlsCmd::Show => {
+            fork::call_path(request, client, Method::GET, PATH, None, "tls show").await?
+        }
+
+        TlsCmd::Install(args) => {
+            // Read both before either is sent, so a missing key is reported
+            // as a missing key rather than as a half-finished install. The
+            // board validates the pair as well and refuses before writing
+            // anything; this is only about the message you get for a typo.
+            let cert = std::fs::read_to_string(&args.cert)
+                .with_context(|| format!("reading {}", args.cert.display()))?;
+            let key = std::fs::read_to_string(&args.key)
+                .with_context(|| format!("reading {}", args.key.display()))?;
+
+            check_pem_shapes(
+                &cert,
+                &key,
+                &args.cert.display().to_string(),
+                &args.key.display().to_string(),
+            )?;
+
+            let body = serde_json::json!({ "certificate": cert, "private_key": key });
+            fork::call_path(
+                request,
+                client,
+                Method::PUT,
+                PATH,
+                Some(&body),
+                "tls install",
+            )
+            .await?
+        }
+
+        TlsCmd::Reset => {
+            fork::call_path(request, client, Method::DELETE, PATH, None, "tls reset").await?
+        }
+    };
+
+    if json {
+        return emit_json(&value).map(|_| 0);
+    }
+
+    let s = |k: &str| value.get(k).and_then(serde_json::Value::as_str);
+
+    println!(
+        "{:<12} {}",
+        "subject",
+        s("subject").unwrap_or("(unreadable)")
+    );
+    println!("{:<12} {}", "issuer", s("issuer").unwrap_or("(unreadable)"));
+    println!("{:<12} {}", "valid from", s("not_before").unwrap_or("?"));
+    println!("{:<12} {}", "valid until", s("not_after").unwrap_or("?"));
+    if let Some(key) = s("key") {
+        println!("{:<12} {key}", "key");
+    }
+
+    // Spelled out rather than printed as the label, because "self-signed" and
+    // "installed" are shorthand for a difference that matters: only one of
+    // them renews itself.
+    match s("source") {
+        Some("self-signed") => println!(
+            "{:<12} issued by the board, and renewed by it 30 days before expiry",
+            "source"
+        ),
+        Some("installed") => println!(
+            "{:<12} installed; the board will not renew it for you",
+            "source"
+        ),
+        Some(other) => println!("{:<12} {other}", "source"),
+        None => {}
+    }
+
+    if let Some(names) = value.get("names").and_then(serde_json::Value::as_array) {
+        let names: Vec<&str> = names.iter().filter_map(serde_json::Value::as_str).collect();
+        if !names.is_empty() {
+            println!("{:<12} {}", "names", names.join(", "));
+        }
+    }
+
+    println!(
+        "{:<12} {}",
+        "fingerprint",
+        s("fingerprint").unwrap_or("(unreadable)")
+    );
+
+    Ok(0)
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::check_pem_shapes;
+
+    const CERT: &str = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+    const KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGH\n-----END PRIVATE KEY-----\n";
+
+    #[test]
+    fn a_proper_pair_passes() {
+        assert!(check_pem_shapes(CERT, KEY, "cert.pem", "key.pem").is_ok());
+    }
+
+    /// The commonest typo, and the one whose server-side message is least
+    /// helpful.
+    #[test]
+    fn the_two_files_swapped_are_caught_here() {
+        let error = check_pem_shapes(KEY, CERT, "key.pem", "cert.pem")
+            .expect_err("a swapped pair must be refused");
+        assert!(
+            format!("{error}").contains("does not look like a PEM certificate"),
+            "{error}"
+        );
+    }
+
+    /// One file holding both halves would send the private key in the field
+    /// the board treats as public and echoes back.
+    #[test]
+    fn a_combined_file_is_refused_before_it_is_sent() {
+        let both = format!("{CERT}{KEY}");
+        let error = check_pem_shapes(&both, KEY, "both.pem", "key.pem")
+            .expect_err("a combined file must be refused");
+        assert!(format!("{error}").contains("Split them"), "{error}");
+    }
+
+    #[test]
+    fn a_key_that_is_not_a_key_is_refused() {
+        let error = check_pem_shapes(CERT, CERT, "cert.pem", "also-cert.pem")
+            .expect_err("a certificate in --key must be refused");
+        assert!(
+            format!("{error}").contains("does not look like a PEM private key"),
+            "{error}"
+        );
     }
 }

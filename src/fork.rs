@@ -297,7 +297,7 @@ pub async fn get(
         }
     }
 
-    unwrap_response(req, client, pairs).await
+    unwrap(req, client, label_of(pairs), None).await
 }
 
 /// One `opt=set` against the legacy API.
@@ -316,22 +316,62 @@ pub async fn set(
         }
     }
 
-    unwrap_response(req, client, pairs).await
+    unwrap(req, client, label_of(pairs), None).await
 }
 
-async fn unwrap_response(
-    req: Request,
-    client: &Client,
-    pairs: &[(&str, &str)],
-) -> Result<serde_json::Value> {
-    let what = pairs
+/// What to call this request when it fails. The legacy API names its
+/// operations in `type`, and a message that says which one is worth more than
+/// the status line.
+fn label_of<'a>(pairs: &[(&'a str, &'a str)]) -> &'a str {
+    pairs
         .iter()
         .find(|(k, _)| *k == "type")
         .map(|(_, v)| *v)
-        .unwrap_or("request");
+        .unwrap_or("request")
+}
 
+/// One call against a path of the fork's own, rather than the legacy
+/// `opt=`/`type=` dispatcher.
+///
+/// A `404` is translated, because the literal one is unhelpful: on a board
+/// whose daemon predates the endpoint it is the only symptom, and "not found"
+/// reads as a mistyped command rather than an old board.
+///
+/// This is why there is no version gate here as there is on the legacy
+/// commands. A gate costs a round-trip to read `about` and has to name a
+/// version that does not exist yet while the daemon change is unreleased; the
+/// board's own answer is free and cannot be wrong.
+pub async fn call_path(
+    request: &Request,
+    client: &Client,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&serde_json::Value>,
+    what: &str,
+) -> Result<serde_json::Value> {
+    let req = request.to_path(method, path, body)?;
+    unwrap(req, client, what, Some(path)).await
+}
+
+async fn unwrap(
+    req: Request,
+    client: &Client,
+    what: &str,
+    // Set for a call against one of the fork's own paths. A 404 there means
+    // the daemon predates the endpoint, and the literal "not found" reads as
+    // a mistyped command rather than an old board.
+    path: Option<&str>,
+) -> Result<serde_json::Value> {
     let resp = req.send(client.clone()).await?;
     let status = resp.status();
+
+    if let (Some(path), reqwest::StatusCode::NOT_FOUND) = (path, status) {
+        bail!(
+            "{what}: this board's daemon has no {path}. That endpoint arrived in a later \
+             release -- `tpi firmware check` will say whether one is available."
+        );
+    }
+
     let bytes = resp.bytes().await?;
 
     let body: serde_json::Value = serde_json::from_slice(&bytes).with_context(|| {
