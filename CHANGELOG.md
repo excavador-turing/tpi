@@ -17,6 +17,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`tpi network switch`** — `show`, `presets`, `apply`, `confirm`, `revert`.
+  The command line for the on-board switch.
+
+  `apply` takes `--preset flat|split|trunk` or `--table file.json`, with
+  `--mgmt-vid`, `--node-vid` and `--second-uplink` for trunk, and `--window`
+  for the confirm window.
+
+  It prints what it has done in the terms that matter: the change is on the
+  switch and **not kept**, the board will put the previous configuration back
+  unless you confirm, and the countdown starts when the uplink forwards rather
+  than now. The confirm command is printed ready to paste, because the moment
+  you need it is the moment the page you were reading may have gone.
+
+  `confirm` is a separate invocation on purpose. That is the proof: if it can
+  reach the board, the new configuration works.
+
+  Trunk's two VLAN identifiers are refused here rather than at the board when
+  they are missing or equal. They are the operator's — the router on the other
+  end has to agree, and this tool cannot know what is free there.
+
+  `presets` never expands anything itself. A client that expanded a preset
+  would eventually disagree with the board about what it means, and that
+  disagreement is a board nobody can reach.
+
+
+### Added
+
 - **`tpi tls show`, `tpi tls install --cert --key` and `tpi tls reset`.** The
   certificate the board serves over HTTPS, readable and replaceable from the
   command line. For anyone running their own CA who wants a board a browser
