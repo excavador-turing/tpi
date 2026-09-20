@@ -119,6 +119,9 @@ impl LegacyHandler {
             Commands::Hostname(args) => {
                 return fork_cmd::hostname_cmd(&self.request, &self.client, args, self.json).await
             }
+            Commands::Tls(args) => {
+                return fork_cmd::tls_cmd(&self.request, &self.client, &args.cmd, self.json).await
+            }
             Commands::Ntp(args) => {
                 return fork_cmd::ntp_cmd(&self.request, &self.client, args.cmd.as_ref(), self.json)
                     .await
@@ -178,7 +181,8 @@ impl LegacyHandler {
             | Commands::Thermal
             | Commands::Hostname(_)
             | Commands::Ntp(_)
-            | Commands::Config(_) => {
+            | Commands::Config(_)
+            | Commands::Tls(_) => {
                 unreachable!("handled by the fork dispatch above")
             }
             Commands::Info => self.handle_info(),

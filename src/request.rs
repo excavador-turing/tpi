@@ -91,6 +91,49 @@ impl Request {
         })
     }
 
+    /// A request against one of the fork's own paths, with an optional JSON
+    /// body.
+    ///
+    /// Everything else here speaks the legacy API: one path, `/api/bmc`, with
+    /// the operation in the query string. The certificate endpoints cannot,
+    /// and that is deliberate on the daemon's side -- it writes every
+    /// mutating legacy query to the audit log in full, so a private key in
+    /// one would be recorded in clear.
+    ///
+    /// `path` is relative to `/api/bmc`, without a leading slash.
+    pub fn to_path(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<Self> {
+        let mut url = url_from_host(&self.host, self.ver.scheme())?;
+        url.set_path(&format!("api/bmc/{path}"));
+
+        let mut inner = reqwest::Request::new(method, url);
+        if let Some(ua) = self.inner.headers().get(USER_AGENT) {
+            inner.headers_mut().insert(USER_AGENT, ua.clone());
+        }
+        if let Some(body) = body {
+            inner.headers_mut().insert(
+                reqwest::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            // Serialised into bytes rather than streamed, because `send`
+            // clones the request to retry it once without a token, and a
+            // streaming body cannot be cloned.
+            *inner.body_mut() = Some(serde_json::to_vec(body)?.into());
+        }
+
+        Ok(Self {
+            host: self.host.clone(),
+            ver: self.ver,
+            creds: self.creds.clone(),
+            inner,
+            multipart: None,
+        })
+    }
+
     pub fn set_multipart(&mut self, form: Form) {
         self.multipart = Some(form);
     }

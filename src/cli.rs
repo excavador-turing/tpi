@@ -133,6 +133,10 @@ pub enum Commands {
     #[command(arg_required_else_help = true)]
     Config(ConfigArgs),
 
+    /// The certificate this board serves over HTTPS
+    #[command(arg_required_else_help = true)]
+    Tls(TlsArgs),
+
     /// Print turing-pi info
     Info,
 
@@ -401,6 +405,49 @@ pub struct HostnameArgs {
     /// no history. If your scraper labels targets by hostname, that is where
     /// to change it.
     pub name: Option<String>,
+}
+
+#[derive(Args, Clone)]
+pub struct TlsArgs {
+    #[command(subcommand)]
+    pub cmd: TlsCmd,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum TlsCmd {
+    /// What the board serves now: subject, issuer, expiry, key and the names
+    /// it asserts.
+    Show,
+
+    /// Install a certificate and its key.
+    ///
+    /// For a board that should serve a certificate from your own CA, so a
+    /// browser that trusts that CA opens it without a warning -- and the
+    /// serial console works, which a click-through exception does not cover.
+    ///
+    /// Takes effect on the next connection. The board is not restarted and
+    /// existing sessions are not dropped.
+    Install(TlsInstallArgs),
+
+    /// Remove an installed certificate and let the board issue its own.
+    ///
+    /// The board is never left without a certificate. Refused when it is
+    /// already serving its own.
+    Reset,
+}
+
+#[derive(Args, Clone)]
+pub struct TlsInstallArgs {
+    /// The certificate, PEM. Intermediates may follow the leaf in the same
+    /// file, leaf first, which is the order every tool writes them.
+    #[arg(long, value_name = "FILE")]
+    pub cert: PathBuf,
+
+    /// Its private key, PEM.
+    ///
+    /// Read and sent; never printed, and never written to the board's log.
+    #[arg(long, value_name = "FILE")]
+    pub key: PathBuf,
 }
 
 #[derive(Args, Clone)]
