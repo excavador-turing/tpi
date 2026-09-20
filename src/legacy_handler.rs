@@ -119,6 +119,11 @@ impl LegacyHandler {
             Commands::Hostname(args) => {
                 return fork_cmd::hostname_cmd(&self.request, &self.client, args, self.json).await
             }
+            Commands::Network(args) => {
+                let crate::cli::NetworkCmd::Switch(switch) = &args.cmd;
+                return fork_cmd::switch_cmd(&self.request, &self.client, &switch.cmd, self.json)
+                    .await;
+            }
             Commands::Tls(args) => {
                 return fork_cmd::tls_cmd(&self.request, &self.client, &args.cmd, self.json).await
             }
@@ -182,7 +187,8 @@ impl LegacyHandler {
             | Commands::Hostname(_)
             | Commands::Ntp(_)
             | Commands::Config(_)
-            | Commands::Tls(_) => {
+            | Commands::Tls(_)
+            | Commands::Network(_) => {
                 unreachable!("handled by the fork dispatch above")
             }
             Commands::Info => self.handle_info(),

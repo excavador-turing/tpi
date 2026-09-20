@@ -137,6 +137,10 @@ pub enum Commands {
     #[command(arg_required_else_help = true)]
     Tls(TlsArgs),
 
+    /// The on-board Ethernet switch: which ports can talk to which
+    #[command(arg_required_else_help = true)]
+    Network(NetworkArgs),
+
     /// Print turing-pi info
     Info,
 
@@ -405,6 +409,112 @@ pub struct HostnameArgs {
     /// no history. If your scraper labels targets by hostname, that is where
     /// to change it.
     pub name: Option<String>,
+}
+
+#[derive(Args, Clone)]
+pub struct NetworkArgs {
+    #[command(subcommand)]
+    pub cmd: NetworkCmd,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum NetworkCmd {
+    /// The on-board switch
+    #[command(arg_required_else_help = true)]
+    Switch(SwitchArgs),
+}
+
+#[derive(Args, Clone)]
+pub struct SwitchArgs {
+    #[command(subcommand)]
+    pub cmd: SwitchCmd,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum SwitchCmd {
+    /// What the switch is running, what was last confirmed, and anything
+    /// waiting to be confirmed.
+    Show,
+
+    /// The presets the board offers, expanded by the board itself.
+    ///
+    /// The board expands them, never this tool: a client that expanded a
+    /// preset itself would eventually disagree with the board about what it
+    /// means, and that disagreement is a board nobody can reach.
+    Presets,
+
+    /// Apply a configuration, to be confirmed.
+    ///
+    /// The change goes on the switch and is NOT kept. Confirm it within the
+    /// window or the board puts the previous configuration back by itself.
+    ///
+    /// The window does not start counting until the uplink carrying the BMC's
+    /// VLAN forwards, because spanning tree holds a port for its own
+    /// forwarding delay first.
+    Apply(SwitchApplyArgs),
+
+    /// Keep a change that was applied.
+    ///
+    /// Run this as a NEW invocation after the apply. That is the proof: if
+    /// this command can reach the board, the new configuration works.
+    Confirm(SwitchConfirmArgs),
+
+    /// Put a pending change back now, rather than waiting out its window.
+    Revert,
+}
+
+#[derive(Args, Clone)]
+pub struct SwitchApplyArgs {
+    /// flat, split or trunk. Mutually exclusive with --table.
+    #[arg(long, value_name = "NAME", conflicts_with = "table")]
+    pub preset: Option<SwitchPresetArg>,
+
+    /// A whole document as JSON, for anything the presets do not cover.
+    #[arg(long, value_name = "FILE", conflicts_with = "preset")]
+    pub table: Option<PathBuf>,
+
+    /// Trunk only: the VLAN the BMC is on. Yours, because your router has to
+    /// match it.
+    #[arg(long, value_name = "VID")]
+    pub mgmt_vid: Option<u16>,
+
+    /// Trunk only: the VLAN the modules are on.
+    #[arg(long, value_name = "VID")]
+    pub node_vid: Option<u16>,
+
+    /// Trunk only. `redundant` gives ge1 the same VLANs as ge0 under spanning
+    /// tree; `off` leaves ge1 carrying nothing.
+    #[arg(long, value_name = "MODE")]
+    pub second_uplink: Option<SecondUplinkArg>,
+
+    /// Seconds to confirm within. The board's default is 30.
+    #[arg(long, value_name = "SECONDS")]
+    pub window: Option<u64>,
+}
+
+#[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchPresetArg {
+    /// One network: every module, the BMC and both uplinks share it.
+    Flat,
+    /// Two networks that never meet: the BMC out of ge0, the modules out of
+    /// ge1, nothing tagged.
+    Split,
+    /// One cable carrying both, tagged, for a router that knows the VLANs.
+    Trunk,
+}
+
+#[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
+pub enum SecondUplinkArg {
+    /// ge1 carries what ge0 carries, and spanning tree picks one.
+    Redundant,
+    /// ge1 carries nothing.
+    Off,
+}
+
+#[derive(Args, Clone)]
+pub struct SwitchConfirmArgs {
+    /// The token the apply printed.
+    pub token: String,
 }
 
 #[derive(Args, Clone)]

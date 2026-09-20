@@ -25,8 +25,8 @@ use anyhow::{bail, Context, Result};
 use reqwest::{Client, Method};
 
 use crate::cli::{
-    ConfigCmd, HostnameArgs, InstallArgs, ListArgs, NtpCmd, SourceAddArgs, SourceKindArg,
-    SourcesCmd, TlsCmd,
+    ConfigCmd, HostnameArgs, InstallArgs, ListArgs, NtpCmd, SecondUplinkArg, SourceAddArgs,
+    SourceKindArg, SourcesCmd, SwitchApplyArgs, SwitchCmd, SwitchPresetArg, TlsCmd,
 };
 use crate::fork::{
     self, About, Relation, Source, SourceKind, Sources, SINCE_CONFIG, SINCE_FIRMWARE_CATALOGUE,
@@ -1614,5 +1614,384 @@ mod tls_tests {
             format!("{error}").contains("does not look like a PEM private key"),
             "{error}"
         );
+    }
+}
+
+/// Build the JSON body an apply takes, or say why the arguments do not make
+/// one.
+///
+/// Separate from the command so the argument combinations -- which are the
+/// part a person gets wrong -- can be tested without a board.
+fn switch_apply_body(args: &SwitchApplyArgs) -> Result<serde_json::Value> {
+    let mut body = match (&args.preset, &args.table) {
+        (Some(preset), None) => match preset {
+            SwitchPresetArg::Flat => serde_json::json!({ "preset": "flat" }),
+            SwitchPresetArg::Split => serde_json::json!({ "preset": "split" }),
+            SwitchPresetArg::Trunk => {
+                // Trunk is the only preset with numbers in it, and they are
+                // the operator's: the router on the other end has to agree,
+                // and this tool has no way to know what is free there.
+                let (Some(mgmt), Some(node)) = (args.mgmt_vid, args.node_vid) else {
+                    bail!(
+                        "trunk needs --mgmt-vid and --node-vid. They are the VLANs your router \
+                         uses for this board and its modules, so only you know them."
+                    );
+                };
+                if mgmt == node {
+                    bail!(
+                        "--mgmt-vid and --node-vid are both {mgmt}. They have to differ, or the \
+                         two networks are one network."
+                    );
+                }
+                let second = match args.second_uplink.unwrap_or(SecondUplinkArg::Redundant) {
+                    SecondUplinkArg::Redundant => "redundant",
+                    SecondUplinkArg::Off => "off",
+                };
+                serde_json::json!({
+                    "preset": "trunk",
+                    "management_vid": mgmt,
+                    "node_vid": node,
+                    "second_uplink": second,
+                })
+            }
+        },
+        (None, Some(path)) => {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            serde_json::from_str(&raw)
+                .with_context(|| format!("{} is not a switch document", path.display()))?
+        }
+        (None, None) => bail!("give either --preset or --table."),
+        // clap's `conflicts_with` already refuses this; the arm is here so the
+        // function is total rather than relying on an argument parser for
+        // correctness.
+        (Some(_), Some(_)) => bail!("--preset and --table are alternatives."),
+    };
+
+    if let Some(window) = args.window {
+        body["window_s"] = serde_json::json!(window);
+    }
+    Ok(body)
+}
+
+/// `tpi network switch ...`
+pub async fn switch_cmd(
+    request: &Request,
+    client: &Client,
+    cmd: &SwitchCmd,
+    json: bool,
+) -> Result<u8> {
+    const PATH: &str = "network/switch";
+
+    let value = match cmd {
+        SwitchCmd::Show => {
+            fork::call_path(request, client, Method::GET, PATH, None, "switch show").await?
+        }
+        SwitchCmd::Presets => {
+            fork::call_path(
+                request,
+                client,
+                Method::GET,
+                "network/switch/presets",
+                None,
+                "switch presets",
+            )
+            .await?
+        }
+        SwitchCmd::Apply(args) => {
+            let body = switch_apply_body(args)?;
+            fork::call_path(
+                request,
+                client,
+                Method::PUT,
+                PATH,
+                Some(&body),
+                "switch apply",
+            )
+            .await?
+        }
+        SwitchCmd::Confirm(args) => {
+            let body = serde_json::json!({ "token": args.token });
+            fork::call_path(
+                request,
+                client,
+                Method::POST,
+                "network/switch/confirm",
+                Some(&body),
+                "switch confirm",
+            )
+            .await?
+        }
+        SwitchCmd::Revert => {
+            fork::call_path(
+                request,
+                client,
+                Method::POST,
+                "network/switch/revert",
+                None,
+                "switch revert",
+            )
+            .await?
+        }
+    };
+
+    if json {
+        return emit_json(&value).map(|_| 0);
+    }
+
+    match cmd {
+        SwitchCmd::Presets => print_switch_presets(&value),
+        SwitchCmd::Apply(_) => print_switch_pending(&value),
+        _ => print_switch_state(&value),
+    }
+    Ok(0)
+}
+
+/// One line per port: what it is untagged in, what it carries tagged.
+fn print_switch_ports(document: &serde_json::Value) {
+    let filtering = document
+        .get("vlan_filtering")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !filtering {
+        println!("  one network; the switch does not look at VLANs");
+        return;
+    }
+    let Some(ports) = document.get("ports").and_then(serde_json::Value::as_object) else {
+        return;
+    };
+    for (name, config) in ports {
+        let untagged = config
+            .get("untagged")
+            .and_then(serde_json::Value::as_u64)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let tagged: Vec<String> = config
+            .get("tagged")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(serde_json::Value::as_u64)
+                    .map(|v| v.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tagged = if tagged.is_empty() {
+            String::new()
+        } else {
+            format!("  tagged {}", tagged.join(","))
+        };
+        println!("  {name:<8} untagged {untagged}{tagged}");
+    }
+    if let Some(stp) = document.get("stp").and_then(serde_json::Value::as_bool) {
+        println!("  {:<8} {}", "stp", if stp { "on" } else { "off" });
+    }
+}
+
+fn print_switch_state(value: &serde_json::Value) {
+    if let Some(running) = value.get("running") {
+        println!("running:");
+        print_switch_ports(running);
+    }
+    match value.get("confirmed") {
+        Some(serde_json::Value::Null) | None => {
+            println!("confirmed: nothing yet -- a reboot comes back to the board's default");
+        }
+        Some(_) => println!("confirmed: yes -- a reboot comes back to this"),
+    }
+
+    if let Some(pending) = value.get("pending").filter(|p| !p.is_null()) {
+        let token = pending
+            .get("token")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let window = pending
+            .get("window_s")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        println!();
+        match pending.get("counting_from") {
+            Some(serde_json::Value::Null) | None => println!(
+                "A CHANGE IS WAITING. The {window}s window has not started: the uplink is not \
+                 forwarding yet."
+            ),
+            Some(_) => println!("A CHANGE IS WAITING, with a {window}s window already running."),
+        }
+        println!("Confirm it with:  tpi network switch confirm {token}");
+    }
+
+    if let Some(revert) = value.get("last_revert").filter(|r| !r.is_null()) {
+        let reason = revert
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        println!();
+        println!("last revert: {reason}");
+    }
+}
+
+fn print_switch_pending(value: &serde_json::Value) {
+    let token = value
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    let window = value
+        .get("window_s")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    println!("Applied, and NOT yet kept.");
+    println!();
+    println!(
+        "The board will put the previous configuration back in {window}s unless you confirm. \
+         The countdown starts when the uplink forwards, not now."
+    );
+    println!();
+    println!("  tpi network switch confirm {token}");
+}
+
+fn print_switch_presets(value: &serde_json::Value) {
+    let Some(presets) = value.get("presets").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    for preset in presets {
+        let name = preset
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let summary = preset
+            .get("summary")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        println!("{name}");
+        println!("  {summary}");
+        if let Some(document) = preset.get("document") {
+            print_switch_ports(document);
+        }
+        println!();
+    }
+}
+
+#[cfg(test)]
+mod switch_tests {
+    use super::switch_apply_body;
+    use crate::cli::{SecondUplinkArg, SwitchApplyArgs, SwitchPresetArg};
+
+    fn args() -> SwitchApplyArgs {
+        SwitchApplyArgs {
+            preset: None,
+            table: None,
+            mgmt_vid: None,
+            node_vid: None,
+            second_uplink: None,
+            window: None,
+        }
+    }
+
+    #[test]
+    fn a_preset_with_no_numbers_needs_nothing_else() {
+        for (preset, name) in [
+            (SwitchPresetArg::Flat, "flat"),
+            (SwitchPresetArg::Split, "split"),
+        ] {
+            let body = switch_apply_body(&SwitchApplyArgs {
+                preset: Some(preset),
+                ..args()
+            })
+            .expect("no numbers required");
+            assert_eq!(body["preset"], name);
+        }
+    }
+
+    /// Trunk's VLAN identifiers are the operator's, because the router on the
+    /// other end has to agree and this tool cannot know what is free there.
+    /// Guessing would produce a board that is configured and unreachable.
+    #[test]
+    fn trunk_without_its_vlans_is_refused_before_the_board_is_asked() {
+        let error = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::Trunk),
+            ..args()
+        })
+        .expect_err("trunk needs numbers");
+        assert!(format!("{error}").contains("--mgmt-vid and --node-vid"));
+    }
+
+    #[test]
+    fn trunk_with_one_vlan_for_both_is_refused() {
+        let error = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::Trunk),
+            mgmt_vid: Some(10),
+            node_vid: Some(10),
+            ..args()
+        })
+        .expect_err("one VLAN is not two networks");
+        assert!(format!("{error}").contains("the two networks are one network"));
+    }
+
+    #[test]
+    fn trunk_defaults_its_second_uplink_to_redundant() {
+        let body = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::Trunk),
+            mgmt_vid: Some(10),
+            node_vid: Some(20),
+            ..args()
+        })
+        .expect("valid");
+        assert_eq!(body["second_uplink"], "redundant");
+    }
+
+    #[test]
+    fn the_second_uplink_can_be_turned_off() {
+        let body = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::Trunk),
+            mgmt_vid: Some(10),
+            node_vid: Some(20),
+            second_uplink: Some(SecondUplinkArg::Off),
+            ..args()
+        })
+        .expect("valid");
+        assert_eq!(body["second_uplink"], "off");
+    }
+
+    #[test]
+    fn a_window_is_passed_through_and_omitted_when_absent() {
+        let with = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::Flat),
+            window: Some(90),
+            ..args()
+        })
+        .expect("valid");
+        assert_eq!(with["window_s"], 90);
+
+        let without = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::Flat),
+            ..args()
+        })
+        .expect("valid");
+        assert!(
+            without.get("window_s").is_none(),
+            "absent means the board's default, which only the board knows"
+        );
+    }
+
+    #[test]
+    fn neither_a_preset_nor_a_table_is_refused() {
+        let error = switch_apply_body(&args()).expect_err("nothing to apply");
+        assert!(format!("{error}").contains("--preset or --table"));
+    }
+
+    #[test]
+    fn a_table_that_is_not_a_document_names_the_file() {
+        let dir = std::env::temp_dir().join(format!("tpi-switch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad.json");
+        std::fs::write(&path, b"{ not json").unwrap();
+
+        let error = switch_apply_body(&SwitchApplyArgs {
+            table: Some(path.clone()),
+            ..args()
+        })
+        .expect_err("that is not a document");
+        assert!(format!("{error}").contains("is not a switch document"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
