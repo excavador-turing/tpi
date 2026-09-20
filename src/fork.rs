@@ -367,6 +367,31 @@ pub async fn call_path(
     unwrap(req, client, what, Some(path)).await
 }
 
+/// The board is still on the password it shipped with.
+///
+/// Recognised by the problem document's own title rather than by the status,
+/// because 403 is also what a wrong password and a refused switch
+/// confirmation answer, and those want their own words.
+fn factory_password_refusal(
+    status: reqwest::StatusCode,
+    body: &serde_json::Value,
+) -> Option<String> {
+    if status != reqwest::StatusCode::FORBIDDEN {
+        return None;
+    }
+    let title = body.get("title").and_then(|t| t.as_str())?;
+    if !title.contains("factory password") {
+        return None;
+    }
+    Some(
+        "this board is still using the password it shipped with, so it will do nothing else \
+         until that is changed.\n\nThe password is printed in the quick-start guide and is \
+         the same on every board, which is why the board refuses. Open the board's web \
+         interface and it will ask for a new one; there is nothing else to do first."
+            .to_string(),
+    )
+}
+
 async fn unwrap(
     req: Request,
     client: &Client,
@@ -412,6 +437,24 @@ async fn unwrap(
     })?;
 
     if !status.is_success() {
+        // A board that has never had its password changed refuses almost
+        // everything, and the bare refusal would read as a permissions
+        // problem with whatever was asked for. It is not: it is the board
+        // saying it has not been set up. Worth its own message, with the one
+        // thing that will fix it.
+        if let Some(message) = factory_password_refusal(status, &body) {
+            bail!("{what}: {message}");
+        }
+
+        // A refusal in `application/problem+json` -- the shape every path on
+        // the fork's own endpoints uses -- puts its sentence in `detail`.
+        // Without this the fallback below prints the whole object, message
+        // escaped and buried, which is how a perfectly clear refusal reads as
+        // a parser error.
+        if let Some(detail) = body.get("detail").and_then(|d| d.as_str()) {
+            bail!("{what}: {detail}");
+        }
+
         // bmcd puts its refusal in the body; the status alone ("400 Bad
         // Request") is never the useful half.
         //
@@ -526,6 +569,44 @@ pub async fn update_check(request: &Request, client: &Client) -> Result<UpdateCh
 
 #[cfg(test)]
 mod tests {
+    use super::factory_password_refusal;
+    use reqwest::StatusCode;
+    use serde_json::json;
+
+    fn problem(title: &str) -> serde_json::Value {
+        json!({"type": "about:blank", "title": title, "status": 403, "detail": "..."})
+    }
+
+    #[test]
+    fn a_factory_board_is_recognised_by_what_it_says() {
+        let message = factory_password_refusal(
+            StatusCode::FORBIDDEN,
+            &problem("This board is still using its factory password"),
+        )
+        .expect("that is the one");
+        assert!(message.contains("quick-start guide"), "{message}");
+        assert!(message.contains("web interface"), "{message}");
+    }
+
+    /// 403 is also what a wrong password and a refused switch confirmation
+    /// answer, and each wants its own words. Matching on the status alone
+    /// would have told somebody confirming a switch change from the board's
+    /// console to go and change their password.
+    #[test]
+    fn another_403_is_left_alone() {
+        assert!(factory_password_refusal(
+            StatusCode::FORBIDDEN,
+            &problem("A confirmation from the board itself proves nothing"),
+        )
+        .is_none());
+        assert!(factory_password_refusal(StatusCode::FORBIDDEN, &json!({})).is_none());
+        assert!(factory_password_refusal(
+            StatusCode::BAD_REQUEST,
+            &problem("This board is still using its factory password"),
+        )
+        .is_none());
+    }
+
     use super::*;
 
     /// The comparison that string ordering gets wrong, and the reason this
