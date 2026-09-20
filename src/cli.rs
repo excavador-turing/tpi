@@ -434,7 +434,7 @@ pub struct SwitchArgs {
 pub enum SwitchCmd {
     /// What the switch is running, what was last confirmed, and anything
     /// waiting to be confirmed.
-    Show,
+    Show(SwitchShowArgs),
 
     /// The presets the board offers, expanded by the board itself.
     ///
@@ -461,6 +461,24 @@ pub enum SwitchCmd {
 
     /// Put a pending change back now, rather than waiting out its window.
     Revert,
+}
+
+#[derive(Args, Clone)]
+pub struct SwitchShowArgs {
+    /// Print the running document alone, as JSON, and nothing else.
+    ///
+    /// This is the other half of `apply --table`, and the two are meant to be
+    /// used together:
+    ///
+    ///     tpi network switch show --table > mine.json
+    ///     $EDITOR mine.json
+    ///     tpi network switch apply --table mine.json
+    ///
+    /// Starting from what the board is actually running, rather than from a
+    /// blank file, means the ports you did not mean to change keep the
+    /// configuration they already had.
+    #[arg(long)]
+    pub table: bool,
 }
 
 #[derive(Args, Clone)]

@@ -1684,7 +1684,7 @@ pub async fn switch_cmd(
     const PATH: &str = "network/switch";
 
     let value = match cmd {
-        SwitchCmd::Show => {
+        SwitchCmd::Show(_) => {
             fork::call_path(request, client, Method::GET, PATH, None, "switch show").await?
         }
         SwitchCmd::Presets => {
@@ -1739,12 +1739,63 @@ pub async fn switch_cmd(
         return emit_json(&value).map(|_| 0);
     }
 
+    // `show --table` prints one thing: the running document, ready to be
+    // edited and handed back to `apply --table`. Not the view around it, and
+    // not a heading -- anything else on stdout would have to be deleted by
+    // hand before the file could be used, and a round trip that needs editing
+    // twice is one people stop using.
+    if let SwitchCmd::Show(args) = cmd {
+        if args.table {
+            return emit_json(running_document(&value)?).map(|_| 0);
+        }
+    }
+
     match cmd {
         SwitchCmd::Presets => print_switch_presets(&value),
         SwitchCmd::Apply(_) => print_switch_pending(&value),
         _ => print_switch_state(&value),
     }
     Ok(0)
+}
+
+/// The document the board is running, out of the view around it.
+///
+/// An error rather than an empty object when it is missing: a file written
+/// from nothing would apply nothing, and `apply --table` would accept it --
+/// the board would read an empty `ports` map as every port left at whatever
+/// it happened to be. Better to fail here, where there is something to say.
+fn running_document(value: &serde_json::Value) -> Result<&serde_json::Value> {
+    value
+        .get("running")
+        .filter(|running| running.get("ports").is_some())
+        .context(
+            "this board did not answer with a switch document. It is probably running a firmware              from before the switch configuration existed.",
+        )
+}
+
+/// What the board says after an apply, and what this says before it.
+///
+/// The same sentence as the daemon's refusal and the interface's, deliberately
+/// -- somebody who meets it in one place should recognise it in the next.
+const CONFIRM_FROM_HERE: &str =
+    "Confirm from this machine, or from the board's interface. A confirmation sent from a shell      on the board itself is refused: it crossed no switch port, so it would prove nothing.";
+
+/// A VLAN as a person should read it: the number, and the word for it if the
+/// document carries one.
+///
+/// The number always comes first and is never replaced. It is what `bridge
+/// vlan show` prints, what the router is configured with, and what somebody
+/// will be typing into another machine; a name that hid it would make this
+/// output impossible to check anything against.
+fn vlan_label(names: Option<&serde_json::Map<String, serde_json::Value>>, vid: u64) -> String {
+    let name = names
+        .and_then(|names| names.get(&vid.to_string()))
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty());
+    match name {
+        Some(name) => format!("{vid} ({name})"),
+        None => vid.to_string(),
+    }
 }
 
 /// One line per port: what it is untagged in, what it carries tagged.
@@ -1757,6 +1808,7 @@ fn print_switch_ports(document: &serde_json::Value) {
         println!("  one network; the switch does not look at VLANs");
         return;
     }
+    let names = document.get("names").and_then(serde_json::Value::as_object);
     let Some(ports) = document.get("ports").and_then(serde_json::Value::as_object) else {
         return;
     };
@@ -1764,7 +1816,7 @@ fn print_switch_ports(document: &serde_json::Value) {
         let untagged = config
             .get("untagged")
             .and_then(serde_json::Value::as_u64)
-            .map(|v| v.to_string())
+            .map(|vid| vlan_label(names, vid))
             .unwrap_or_else(|| "-".to_string());
         let tagged: Vec<String> = config
             .get("tagged")
@@ -1772,14 +1824,14 @@ fn print_switch_ports(document: &serde_json::Value) {
             .map(|a| {
                 a.iter()
                     .filter_map(serde_json::Value::as_u64)
-                    .map(|v| v.to_string())
+                    .map(|vid| vlan_label(names, vid))
                     .collect()
             })
             .unwrap_or_default();
         let tagged = if tagged.is_empty() {
             String::new()
         } else {
-            format!("  tagged {}", tagged.join(","))
+            format!("  tagged {}", tagged.join(", "))
         };
         println!("  {name:<8} untagged {untagged}{tagged}");
     }
@@ -1818,6 +1870,7 @@ fn print_switch_state(value: &serde_json::Value) {
             Some(_) => println!("A CHANGE IS WAITING, with a {window}s window already running."),
         }
         println!("Confirm it with:  tpi network switch confirm {token}");
+        println!("{CONFIRM_FROM_HERE}");
     }
 
     if let Some(revert) = value.get("last_revert").filter(|r| !r.is_null()) {
@@ -1847,6 +1900,8 @@ fn print_switch_pending(value: &serde_json::Value) {
     );
     println!();
     println!("  tpi network switch confirm {token}");
+    println!();
+    println!("{CONFIRM_FROM_HERE}");
 }
 
 fn print_switch_presets(value: &serde_json::Value) {
@@ -1868,6 +1923,62 @@ fn print_switch_presets(value: &serde_json::Value) {
             print_switch_ports(document);
         }
         println!();
+    }
+}
+
+#[cfg(test)]
+mod switch_table_tests {
+    use super::{running_document, vlan_label};
+    use serde_json::json;
+
+    /// The round trip this exists for: what `show --table` prints has to be
+    /// something `apply --table` would send back unchanged.
+    #[test]
+    fn the_running_document_comes_out_whole() {
+        let view = json!({
+            "running": {
+                "vlan_filtering": true,
+                "stp": false,
+                "ports": { "bmc": { "untagged": 10, "tagged": [] } },
+                "names": { "10": "management" }
+            },
+            "confirmed": null,
+            "pending": null,
+            "default_window_s": 30
+        });
+        let document = running_document(&view).expect("a board with a switch");
+        assert_eq!(document, &view["running"]);
+        assert!(
+            document.get("confirmed").is_none(),
+            "the view around it must not come with: {document}"
+        );
+    }
+
+    /// An older daemon answers an unrouted path with 200 and `index.html`, so
+    /// a client that trusted the status would write an HTML page into the file
+    /// somebody is about to edit and apply. The shape is the check.
+    #[test]
+    fn a_board_that_answers_without_a_document_is_an_error() {
+        for answer in [
+            json!({}),
+            json!({ "running": null }),
+            json!("<!doctype html>"),
+        ] {
+            let error = running_document(&answer).expect_err("{answer} is not a document");
+            assert!(format!("{error}").contains("before the switch configuration existed"));
+        }
+    }
+
+    /// The number is what somebody types into a router. A name is added
+    /// beside it and never in place of it.
+    #[test]
+    fn a_named_vlan_still_shows_its_number_first() {
+        let names = json!({ "20": "nodes", "30": "" });
+        let names = names.as_object();
+        assert_eq!(vlan_label(names, 20), "20 (nodes)");
+        assert_eq!(vlan_label(names, 10), "10", "unnamed is just the number");
+        assert_eq!(vlan_label(names, 30), "30", "an empty name is no name");
+        assert_eq!(vlan_label(None, 20), "20", "an older board sends no names");
     }
 }
 

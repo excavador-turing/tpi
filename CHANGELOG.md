@@ -17,6 +17,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`tpi network switch show --table`** — the running document alone, as JSON,
+  and nothing else. The other half of `apply --table`, so that editing a
+  layout by hand is a round trip rather than a transcription:
+
+  ```
+  tpi network switch show --table > mine.json
+  $EDITOR mine.json
+  tpi network switch apply --table mine.json
+  ```
+
+  Starting from what the board is running, rather than from a blank file,
+  means the ports you did not mean to change keep what they already had.
+
+  A board whose answer carries no document is an error here rather than an
+  empty file: an older daemon answers an unrouted path with 200 and
+  `index.html`, and writing that into the file somebody is about to apply
+  would be worse than saying so.
+
+- **VLAN names are shown where VLAN numbers are.** `20 (nodes)` rather than
+  `20`, wherever the document the board sent carries a name for it. The number
+  comes first and is never replaced — it is what `bridge vlan show` prints and
+  what the router is configured with, so output that hid it could not be
+  checked against anything.
+
+### Changed
+
+- **`apply` and `show` now say where a confirmation has to come from.** One
+  line under the confirm command:
+
+  > Confirm from this machine, or from the board's interface. A confirmation
+  > sent from a shell on the board itself is refused: it crossed no switch
+  > port, so it would prove nothing.
+
+  The daemon refuses it outright; this is the version somebody reads before
+  they try. Both say the same thing, in the same words, on purpose.
+
+### Added
+
 - **`tpi network switch`** — `show`, `presets`, `apply`, `confirm`, `revert`.
   The command line for the on-board switch.
 
