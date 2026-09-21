@@ -15,6 +15,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v1.10.0] — 2026-09-21
+
 ### Added
 
 - **`tpi network address show | apply | confirm | revert`.** The BMC's own
