@@ -25,12 +25,13 @@ use anyhow::{bail, Context, Result};
 use reqwest::{Client, Method};
 
 use crate::cli::{
-    ConfigCmd, HostnameArgs, InstallArgs, ListArgs, NtpCmd, SecondUplinkArg, SourceAddArgs,
-    SourceKindArg, SourcesCmd, SwitchApplyArgs, SwitchCmd, SwitchPresetArg, TlsCmd,
+    AddressApplyArgs, AddressCmd, ConfigCmd, HostnameArgs, InstallArgs, ListArgs, NtpCmd,
+    SecondUplinkArg, SourceAddArgs, SourceKindArg, SourcesCmd, SwitchApplyArgs, SwitchCmd,
+    SwitchPresetArg, TlsCmd,
 };
 use crate::fork::{
-    self, About, Relation, Source, SourceKind, Sources, SINCE_CONFIG, SINCE_FIRMWARE_CATALOGUE,
-    SINCE_HOSTNAME, SINCE_NTP, SINCE_THERMAL,
+    self, About, Relation, Source, SourceKind, Sources, SINCE_ADDRESS, SINCE_CONFIG,
+    SINCE_FIRMWARE_CATALOGUE, SINCE_HOSTNAME, SINCE_NTP, SINCE_THERMAL,
 };
 use crate::request::Request;
 
@@ -901,7 +902,262 @@ pub async fn ntp_cmd(
             _ => println!("\nthe clock's state could not be read"),
         }
     }
+
+    // What chrony thinks of each source. "NOT synchronised" alone sent a
+    // user to Discord; this is the table that says why.
+    if let Some(sources) = value.get("sources").and_then(|v| v.as_array()) {
+        if !sources.is_empty() {
+            println!();
+            println!(
+                "{:<28} {:<12} {:>7} {:>5} {:>8}",
+                "source", "state", "stratum", "reach", "offset"
+            );
+            for source in sources {
+                let name = source.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let state = source.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+                let stratum = source.get("stratum").and_then(|v| v.as_u64()).unwrap_or(0);
+                let reach = source.get("reach").and_then(|v| v.as_u64()).unwrap_or(0);
+                let offset = source
+                    .get("offset_seconds")
+                    .and_then(|v| v.as_f64())
+                    .map(|o| format!("{:+.1}ms", o * 1000.0))
+                    .unwrap_or_default();
+                let configured = if source.get("configured").and_then(|v| v.as_bool()) == Some(true)
+                {
+                    "configured"
+                } else {
+                    ""
+                };
+                println!(
+                    "{name:<28} {state:<12} {stratum:>7} {reach:>3}/8 {offset:>8}  {configured}"
+                );
+            }
+            let selected = sources
+                .iter()
+                .any(|s| s.get("state").and_then(|v| v.as_str()) == Some("selected"));
+            if !selected {
+                println!();
+                println!(
+                    "no source is selected. `unresolved` means the board could not look the name up \
+                     -- it has no working resolver (`tpi network address show`), or use the server's \
+                     address instead of its name; `unreachable` never answered (address, firewall, a \
+                     router that does not serve NTP); `falseticker` or stratum 16 is a server that \
+                     reports itself unsynchronised, which chrony will not take time from."
+                );
+            }
+        }
+    }
     Ok(0)
+}
+
+fn address_apply_body(args: &AddressApplyArgs) -> Result<serde_json::Value> {
+    let mut body = match (&args.dhcp, &args.static_addr) {
+        (true, None) => serde_json::json!({ "mode": "dhcp" }),
+        (false, Some(cidr)) => {
+            let (address, prefix) = cidr.split_once('/').with_context(|| {
+                format!("{cidr}: give the address with its prefix, like 192.168.1.20/24")
+            })?;
+            let address: std::net::Ipv4Addr = address
+                .parse()
+                .with_context(|| format!("{address} is not an IPv4 address"))?;
+            let prefix: u8 = prefix
+                .parse()
+                .with_context(|| format!("/{prefix} is not a prefix length"))?;
+            let mut doc = serde_json::json!({
+                "mode": "static",
+                "address": address,
+                "prefix": prefix,
+                "dns": args.dns,
+            });
+            if let Some(gw) = args.gateway {
+                doc["gateway"] = serde_json::json!(gw);
+            }
+            if let Some(search) = &args.search {
+                doc["search"] = serde_json::json!(search);
+            }
+            doc
+        }
+        (false, None) => bail!("give --dhcp or --static ADDRESS/PREFIX."),
+        (true, Some(_)) => bail!("--dhcp and --static are alternatives."),
+    };
+    if let Some(window) = args.window {
+        body["window_s"] = serde_json::json!(window);
+    }
+    Ok(body)
+}
+
+/// `tpi network address ...`
+pub async fn address_cmd(
+    request: &Request,
+    client: &Client,
+    cmd: &AddressCmd,
+    json: bool,
+) -> Result<u8> {
+    gate(request, client, "network address", SINCE_ADDRESS).await?;
+    const PATH: &str = "network/address";
+
+    let value = match cmd {
+        AddressCmd::Show => {
+            fork::call_path(request, client, Method::GET, PATH, None, "address show").await?
+        }
+        AddressCmd::Apply(args) => {
+            let body = address_apply_body(args)?;
+            fork::call_path(
+                request,
+                client,
+                Method::PUT,
+                PATH,
+                Some(&body),
+                "address apply",
+            )
+            .await?
+        }
+        AddressCmd::Confirm(args) => {
+            let body = serde_json::json!({ "token": args.token });
+            fork::call_path(
+                request,
+                client,
+                Method::POST,
+                "network/address/confirm",
+                Some(&body),
+                "address confirm",
+            )
+            .await?
+        }
+        AddressCmd::Revert => {
+            fork::call_path(
+                request,
+                client,
+                Method::POST,
+                "network/address/revert",
+                None,
+                "address revert",
+            )
+            .await?
+        }
+    };
+
+    if json {
+        return emit_json(&value).map(|_| 0);
+    }
+    match cmd {
+        AddressCmd::Apply(_) => print_address_pending(&value),
+        _ => print_address_state(&value),
+    }
+    Ok(0)
+}
+
+const CONFIRM_ADDRESS_FROM_HERE: &str =
+    "Confirm from a machine that reaches the board at the NEW address, or from the board's \
+     interface opened there. A confirmation sent from a shell on the board itself is refused: it \
+     never used the address, so it would prove nothing.";
+
+/// One line for a document: `dhcp`, or the static address with its parts.
+fn address_words(document: &serde_json::Value) -> String {
+    match document.get("mode").and_then(serde_json::Value::as_str) {
+        Some("dhcp") => "dhcp".to_string(),
+        Some("static") => {
+            let mut out = format!(
+                "static {}/{}",
+                document
+                    .get("address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?"),
+                document.get("prefix").and_then(|v| v.as_u64()).unwrap_or(0)
+            );
+            if let Some(gw) = document.get("gateway").and_then(|v| v.as_str()) {
+                out.push_str(&format!(" via {gw}"));
+            }
+            let dns: Vec<&str> = document
+                .get("dns")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|d| d.as_str()).collect())
+                .unwrap_or_default();
+            if !dns.is_empty() {
+                out.push_str(&format!(", dns {}", dns.join(" ")));
+            }
+            out
+        }
+        _ => "?".to_string(),
+    }
+}
+
+fn print_address_state(value: &serde_json::Value) {
+    if let Some(running) = value.get("running") {
+        println!("running:    {}", address_words(running));
+    }
+    match value.get("configured") {
+        Some(serde_json::Value::Null) | None => {
+            println!("configured: nothing this tool can read -- a reboot comes back to whatever the file says");
+        }
+        Some(configured) => println!(
+            "configured: {}  (what a reboot comes back to)",
+            address_words(configured)
+        ),
+    }
+    if let Some(live) = value.get("live") {
+        let address = live
+            .get("address")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none");
+        let mode = live.get("mode").and_then(|v| v.as_str()).unwrap_or("?");
+        let gw = live
+            .get("gateway")
+            .and_then(|v| v.as_str())
+            .map(|g| format!(" via {g}"))
+            .unwrap_or_default();
+        println!("live:       {address}{gw}  ({mode})");
+    }
+    match value.get("file").and_then(|v| v.as_str()) {
+        Some("hand_edited") => println!("the interfaces file was written by hand; a confirmed change replaces it"),
+        Some("unreadable") => println!("the interfaces file was written by hand and this tool cannot read it; a confirmed change replaces it whole"),
+        _ => {}
+    }
+
+    if let Some(pending) = value.get("pending").filter(|p| !p.is_null()) {
+        let token = pending.get("token").and_then(|v| v.as_str()).unwrap_or("?");
+        let window = pending
+            .get("window_s")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!();
+        println!(
+            "A CHANGE IS WAITING: {}, with a {window}s window running.",
+            pending
+                .get("document")
+                .map(address_words)
+                .unwrap_or_default()
+        );
+        println!("Confirm it with:  tpi network address confirm {token}");
+        println!("{CONFIRM_ADDRESS_FROM_HERE}");
+    }
+    if let Some(revert) = value.get("last_revert").filter(|r| !r.is_null()) {
+        let reason = revert.get("reason").and_then(|v| v.as_str()).unwrap_or("?");
+        println!();
+        println!(
+            "last revert: {reason} ({})",
+            revert
+                .get("document")
+                .map(address_words)
+                .unwrap_or_default()
+        );
+    }
+}
+
+fn print_address_pending(value: &serde_json::Value) {
+    let token = value.get("token").and_then(|v| v.as_str()).unwrap_or("?");
+    let window = value.get("window_s").and_then(|v| v.as_u64()).unwrap_or(0);
+    println!("Applied, and NOT yet kept.");
+    println!();
+    println!(
+        "The board is now on {}. It will put the previous address back in {window}s unless you \
+         confirm -- at the new address:",
+        value.get("document").map(address_words).unwrap_or_default()
+    );
+    println!();
+    println!("  tpi --host <new address> network address confirm {token}");
+    println!();
+    println!("{CONFIRM_ADDRESS_FROM_HERE}");
 }
 
 /// `tpi config export | import`

@@ -55,6 +55,8 @@ pub const SINCE_CONFIG: &str = "2.14.0";
 pub const SINCE_HEALTH: &str = "2.15.0";
 /// The microSD listing arrived with 2.34.0.
 pub const SINCE_SDCARD_FILES: &str = "2.34.0";
+/// `/network/address`: the board's own address, applied then confirmed.
+pub const SINCE_ADDRESS: &str = "2.38.0";
 
 /// What the board says about itself.
 #[derive(Debug, Clone, Deserialize)]
