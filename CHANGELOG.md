@@ -15,6 +15,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`tpi network address show | apply | confirm | revert`.** The BMC's own
+  address from the command line: `apply --dhcp`, or `apply --static
+  192.168.1.20/24 --gateway 192.168.1.1 --dns 192.168.1.1`, applied and NOT
+  kept until `confirm` reaches the board at the new address -- run it as a
+  new invocation with `--host <new address>`. A confirmation from a shell on
+  the board is refused, as the switch's is. Needs bmcd 2.38.0.
+- **`tpi ntp` prints what chrony thinks of each source**: state (`selected`,
+  `combined`, `excluded`, `unreachable`, `falseticker`), stratum, how many of
+  the last eight polls answered, the offset -- and, when nothing is selected,
+  one sentence on what `unreachable` and `falseticker` mean. "NOT
+  synchronised" on its own sent a user to Discord with nothing to act on.
+
 ## [v1.9.0] — 2026-09-20
 
 ### Changed

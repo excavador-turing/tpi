@@ -120,9 +120,16 @@ impl LegacyHandler {
                 return fork_cmd::hostname_cmd(&self.request, &self.client, args, self.json).await
             }
             Commands::Network(args) => {
-                let crate::cli::NetworkCmd::Switch(switch) = &args.cmd;
-                return fork_cmd::switch_cmd(&self.request, &self.client, &switch.cmd, self.json)
-                    .await;
+                return match &args.cmd {
+                    crate::cli::NetworkCmd::Switch(switch) => {
+                        fork_cmd::switch_cmd(&self.request, &self.client, &switch.cmd, self.json)
+                            .await
+                    }
+                    crate::cli::NetworkCmd::Address(address) => {
+                        fork_cmd::address_cmd(&self.request, &self.client, &address.cmd, self.json)
+                            .await
+                    }
+                };
             }
             Commands::Tls(args) => {
                 return fork_cmd::tls_cmd(&self.request, &self.client, &args.cmd, self.json).await

@@ -422,6 +422,79 @@ pub enum NetworkCmd {
     /// The on-board switch
     #[command(arg_required_else_help = true)]
     Switch(SwitchArgs),
+
+    /// The BMC's own address: DHCP or static, applied then confirmed
+    #[command(arg_required_else_help = true)]
+    Address(AddressArgs),
+}
+
+#[derive(Args, Clone)]
+pub struct AddressArgs {
+    #[command(subcommand)]
+    pub cmd: AddressCmd,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AddressCmd {
+    /// What the board is on, what a reboot comes back to, what the bridge
+    /// actually has, and anything waiting to be confirmed.
+    Show,
+
+    /// Apply an address, to be confirmed AT that address.
+    ///
+    /// The address goes on the bridge and is NOT kept. Confirm within the
+    /// window -- from a machine that reaches the board at the new address --
+    /// or the board puts the previous one back by itself. The bridge and the
+    /// modules' ports are never brought down; only the address changes.
+    Apply(AddressApplyArgs),
+
+    /// Keep an address that was applied.
+    ///
+    /// Run this as a NEW invocation, against the NEW address. That is the
+    /// proof: if this command reaches the board, the address works.
+    Confirm(AddressConfirmArgs),
+
+    /// Put a pending address back now, rather than waiting out its window.
+    Revert,
+}
+
+#[derive(Args, Clone)]
+pub struct AddressApplyArgs {
+    /// Ask the network for an address (the image's default).
+    #[arg(long, conflicts_with_all = ["static_addr", "gateway", "dns", "search"])]
+    pub dhcp: bool,
+
+    /// A fixed address with its prefix, e.g. 192.168.1.20/24.
+    #[arg(
+        long = "static",
+        value_name = "ADDRESS/PREFIX",
+        conflicts_with = "dhcp"
+    )]
+    pub static_addr: Option<String>,
+
+    /// The gateway, on the same subnet. Optional; without one the board
+    /// reaches its own subnet and nothing beyond.
+    #[arg(long, value_name = "ADDRESS")]
+    pub gateway: Option<std::net::Ipv4Addr>,
+
+    /// A resolver; repeat for more, in order. Without one names do not
+    /// resolve on the board, `pool.ntp.org` included.
+    #[arg(long, value_name = "ADDRESS")]
+    pub dns: Vec<std::net::Ipv4Addr>,
+
+    /// A search domain for the resolver.
+    #[arg(long, value_name = "DOMAIN")]
+    pub search: Option<String>,
+
+    /// Seconds to confirm within. The board's default is 30.
+    #[arg(long, value_name = "SECONDS")]
+    pub window: Option<u64>,
+}
+
+#[derive(Args, Clone)]
+pub struct AddressConfirmArgs {
+    /// The token the apply printed.
+    pub token: String,
 }
 
 #[derive(Args, Clone)]
