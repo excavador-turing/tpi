@@ -15,6 +15,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`tpi network switch` LACP uplink.** `--preset flat-lag` / `trunk-lag`, or
+  `--second-uplink lag` on `flat` / `trunk`, send the board
+  `{"preset":"flat|trunk","second_uplink":"lag"}` so ge0+ge1 become LACP
+  `bond0`. `show` and `presets` now print the port table under flat+lag too,
+  so `bond0` is visible. Needs a bmcd that accepts `second_uplink:
+  lag` (and ifupdown-ng's bond executor to confirm).
+
 ## [v1.10.0] — 2026-09-21
 
 ### Added

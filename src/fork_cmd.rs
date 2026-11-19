@@ -22,6 +22,7 @@
 use std::io::{IsTerminal, Write};
 
 use anyhow::{bail, Context, Result};
+use clap::ValueEnum;
 use reqwest::{Client, Method};
 
 use crate::cli::{
@@ -1873,6 +1874,17 @@ mod tls_tests {
     }
 }
 
+/// An argument as it is spelled on the command line, which for the switch
+/// arguments is also how the board spells it. One list of names -- clap's --
+/// rather than a second one here to keep in step with it.
+fn cli_name(value: &impl ValueEnum) -> String {
+    value
+        .to_possible_value()
+        .expect("no argument value is skipped")
+        .get_name()
+        .to_string()
+}
+
 /// Build the JSON body an apply takes, or say why the arguments do not make
 /// one.
 ///
@@ -1880,37 +1892,69 @@ mod tls_tests {
 /// part a person gets wrong -- can be tested without a board.
 fn switch_apply_body(args: &SwitchApplyArgs) -> Result<serde_json::Value> {
     let mut body = match (&args.preset, &args.table) {
-        (Some(preset), None) => match preset {
-            SwitchPresetArg::Flat => serde_json::json!({ "preset": "flat" }),
-            SwitchPresetArg::Split => serde_json::json!({ "preset": "split" }),
-            SwitchPresetArg::Trunk => {
-                // Trunk is the only preset with numbers in it, and they are
-                // the operator's: the router on the other end has to agree,
-                // and this tool has no way to know what is free there.
-                let (Some(mgmt), Some(node)) = (args.mgmt_vid, args.node_vid) else {
-                    bail!(
-                        "trunk needs --mgmt-vid and --node-vid. They are the VLANs your router \
-                         uses for this board and its modules, so only you know them."
-                    );
-                };
-                if mgmt == node {
-                    bail!(
-                        "--mgmt-vid and --node-vid are both {mgmt}. They have to differ, or the \
-                         two networks are one network."
-                    );
+        (Some(preset), None) => {
+            // The `-lag` names are the board's list labels, not wire values:
+            // on the wire they are `flat` / `trunk` with `second_uplink: lag`.
+            let name = cli_name(preset);
+            let implies_lag =
+                matches!(preset, SwitchPresetArg::FlatLag | SwitchPresetArg::TrunkLag);
+            let second = match args.second_uplink {
+                Some(other) if implies_lag && other != SecondUplinkArg::Lag => bail!(
+                    "--preset {name} is already lag; omit --second-uplink or pass lag (got {}).",
+                    cli_name(&other)
+                ),
+                None if implies_lag => Some(SecondUplinkArg::Lag),
+                second => second,
+            };
+            match preset {
+                SwitchPresetArg::Flat | SwitchPresetArg::FlatLag => {
+                    let mut body = serde_json::json!({ "preset": "flat" });
+                    match second {
+                        None => {}
+                        Some(SecondUplinkArg::Lag) => body["second_uplink"] = "lag".into(),
+                        Some(other) => bail!(
+                            "flat only takes --second-uplink lag (got {}). Use --preset \
+                             flat-lag, or omit --second-uplink for independent uplinks.",
+                            cli_name(&other)
+                        ),
+                    }
+                    body
                 }
-                let second = match args.second_uplink.unwrap_or(SecondUplinkArg::Redundant) {
-                    SecondUplinkArg::Redundant => "redundant",
-                    SecondUplinkArg::Off => "off",
-                };
-                serde_json::json!({
-                    "preset": "trunk",
-                    "management_vid": mgmt,
-                    "node_vid": node,
-                    "second_uplink": second,
-                })
+                SwitchPresetArg::Split => {
+                    if second.is_some() {
+                        bail!(
+                            "--second-uplink does not apply to split: ge0 and ge1 already carry \
+                             different networks."
+                        );
+                    }
+                    serde_json::json!({ "preset": "split" })
+                }
+                SwitchPresetArg::Trunk | SwitchPresetArg::TrunkLag => {
+                    // Trunk is the only preset with numbers in it, and they are
+                    // the operator's: the router on the other end has to agree,
+                    // and this tool has no way to know what is free there.
+                    let (Some(mgmt), Some(node)) = (args.mgmt_vid, args.node_vid) else {
+                        bail!(
+                            "{name} needs --mgmt-vid and --node-vid. They are the VLANs your \
+                             router uses for this board and its modules, so only you know them."
+                        );
+                    };
+                    if mgmt == node {
+                        bail!(
+                            "--mgmt-vid and --node-vid are both {mgmt}. They have to differ, or \
+                             the two networks are one network."
+                        );
+                    }
+                    let second = second.unwrap_or(SecondUplinkArg::Redundant);
+                    serde_json::json!({
+                        "preset": "trunk",
+                        "management_vid": mgmt,
+                        "node_vid": node,
+                        "second_uplink": cli_name(&second),
+                    })
+                }
             }
-        },
+        }
         (None, Some(path)) => {
             let raw = std::fs::read_to_string(path)
                 .with_context(|| format!("reading {}", path.display()))?;
@@ -2060,9 +2104,19 @@ fn print_switch_ports(document: &serde_json::Value) {
         .get("vlan_filtering")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    // Only lag is worth a word: the board writes `second_uplink` into every
+    // document, `redundant` under plain flat included, where it means nothing.
+    let lag = document
+        .get("second_uplink")
+        .and_then(serde_json::Value::as_str)
+        == Some("lag");
     if !filtering {
-        println!("  one network; the switch does not look at VLANs");
-        return;
+        if lag {
+            println!("  one network; uplink is bond0 (LACP)");
+        } else {
+            println!("  one network; the switch does not look at VLANs");
+            return;
+        }
     }
     let names = document.get("names").and_then(serde_json::Value::as_object);
     let Some(ports) = document.get("ports").and_then(serde_json::Value::as_object) else {
@@ -2317,6 +2371,111 @@ mod switch_tests {
         })
         .expect("valid");
         assert_eq!(body["second_uplink"], "off");
+    }
+
+    /// The board's list labels `flat-lag` / `trunk-lag` are not wire values:
+    /// what goes on the wire is still `preset: flat|trunk` with
+    /// `second_uplink: lag`, matching what GET …/presets puts in `preset`.
+    #[test]
+    fn flat_lag_sends_flat_with_second_uplink_lag() {
+        for (preset, second_uplink) in [
+            (SwitchPresetArg::FlatLag, None),
+            (SwitchPresetArg::Flat, Some(SecondUplinkArg::Lag)),
+            (SwitchPresetArg::FlatLag, Some(SecondUplinkArg::Lag)),
+        ] {
+            let body = switch_apply_body(&SwitchApplyArgs {
+                preset: Some(preset),
+                second_uplink,
+                ..args()
+            })
+            .expect("valid");
+            assert_eq!(body["preset"], "flat");
+            assert_eq!(body["second_uplink"], "lag");
+        }
+    }
+
+    #[test]
+    fn trunk_lag_sends_trunk_with_second_uplink_lag() {
+        for (preset, second_uplink) in [
+            (SwitchPresetArg::TrunkLag, None),
+            (SwitchPresetArg::Trunk, Some(SecondUplinkArg::Lag)),
+            (SwitchPresetArg::TrunkLag, Some(SecondUplinkArg::Lag)),
+        ] {
+            let body = switch_apply_body(&SwitchApplyArgs {
+                preset: Some(preset),
+                mgmt_vid: Some(10),
+                node_vid: Some(20),
+                second_uplink,
+                ..args()
+            })
+            .expect("valid");
+            assert_eq!(body["preset"], "trunk");
+            assert_eq!(body["second_uplink"], "lag");
+            assert_eq!(body["management_vid"], 10);
+            assert_eq!(body["node_vid"], 20);
+        }
+    }
+
+    #[test]
+    fn flat_refuses_a_second_uplink_that_is_not_lag() {
+        let error = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::Flat),
+            second_uplink: Some(SecondUplinkArg::Redundant),
+            ..args()
+        })
+        .expect_err("flat only takes lag");
+        assert!(format!("{error}").contains("flat only takes --second-uplink lag"));
+    }
+
+    #[test]
+    fn split_refuses_second_uplink() {
+        let error = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::Split),
+            second_uplink: Some(SecondUplinkArg::Lag),
+            ..args()
+        })
+        .expect_err("split has no second uplink mode");
+        assert!(format!("{error}").contains("does not apply to split"));
+    }
+
+    /// Plain flat leaves the second uplink to the board rather than sending a
+    /// value: only lag changes what flat means.
+    #[test]
+    fn plain_flat_sends_no_second_uplink() {
+        let body = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::Flat),
+            ..args()
+        })
+        .expect("valid");
+        assert!(body.get("second_uplink").is_none());
+    }
+
+    #[test]
+    fn a_lag_preset_refuses_a_conflicting_second_uplink() {
+        for (preset, name) in [
+            (SwitchPresetArg::FlatLag, "flat-lag"),
+            (SwitchPresetArg::TrunkLag, "trunk-lag"),
+        ] {
+            let error = switch_apply_body(&SwitchApplyArgs {
+                preset: Some(preset),
+                mgmt_vid: Some(10),
+                node_vid: Some(20),
+                second_uplink: Some(SecondUplinkArg::Off),
+                ..args()
+            })
+            .expect_err("a -lag preset is already lag");
+            assert!(format!("{error}").contains(&format!("--preset {name} is already lag")));
+        }
+    }
+
+    #[test]
+    fn trunk_lag_without_its_vlans_names_the_preset_given() {
+        let error = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::TrunkLag),
+            ..args()
+        })
+        .expect_err("trunk-lag needs numbers");
+        assert!(format!("{error}").starts_with("trunk-lag needs --mgmt-vid"));
     }
 
     #[test]
