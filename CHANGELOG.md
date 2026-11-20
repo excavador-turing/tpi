@@ -15,6 +15,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v1.11.0] — 2026-11-20
+
+`tpi network switch` can set up an LACP uplink. It is
+[@danste22](https://github.com/danste22)'s work
+([#16](https://github.com/excavador-turing/tpi/pull/16)), carried on as
+[#17](https://github.com/excavador-turing/tpi/pull/17) with his commit kept
+under his authorship, and review fixes on top. Thank you, Daniel.
+
 ### Added
 
 - **`tpi network switch` LACP uplink.** `--preset flat-lag` / `trunk-lag`, or
@@ -24,7 +32,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so `bond0` is visible, and say that ge0 and ge1 are the bond's members
   (their empty rows are not a fault). Needs a bmcd that accepts
   `second_uplink: lag` (and ifupdown-ng's bond executor to confirm), and LACP
-  on both ports of the switch at the other end. (thanks @danste22, #16)
+  on both ports of the switch at the other end. (thanks [@danste22](https://github.com/danste22), [#16](https://github.com/excavador-turing/tpi/pull/16)/[#17](https://github.com/excavador-turing/tpi/pull/17))
 
 - **`tpi network switch apply --replace-hand-written`.** LACP needs `bond0`
   declared in `/etc/network/interfaces`, so over a hand-written file the board
@@ -32,14 +40,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `replace_hand_written: true`, and a confirmed change replaces the file
   (the board keeps a copy beside it). Without it, that 409 now says so in
   `tpi`'s words and names the flag; the 409 for a `bond0` the board did not
-  make says how to remove it. Every other change needs neither. (review of #16)
+  make says how to remove it. Every other change needs neither. (review of [#16](https://github.com/excavador-turing/tpi/pull/16))
 
 ### Changed
 
 - **`--preset flat --second-uplink redundant|off` is refused.** It used to be
   ignored without a word; flat takes only `--second-uplink lag` (or
   `--preset flat-lag`). `--preset split` refuses `--second-uplink` as well.
-  (thanks @danste22, #16)
+  (thanks [@danste22](https://github.com/danste22), [#16](https://github.com/excavador-turing/tpi/pull/16)/[#17](https://github.com/excavador-turing/tpi/pull/17))
 
 ## [v1.10.0] — 2026-09-21
 
