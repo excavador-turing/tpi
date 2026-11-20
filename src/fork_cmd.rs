@@ -984,53 +984,7 @@ fn address_apply_body(args: &AddressApplyArgs) -> Result<serde_json::Value> {
     if let Some(window) = args.window {
         body["window_s"] = serde_json::json!(window);
     }
-    // Sent only when asked for. It means yes to replacing an `interfaces` file
-    // somebody wrote by hand, which the board asks about for LACP and for
-    // nothing else; sending it always would answer a question nobody had put.
-    if args.replace_hand_written {
-        let Some(object) = body.as_object_mut() else {
-            bail!("a switch document is a JSON object; --replace-hand-written has nowhere to go.");
-        };
-        object.insert("replace_hand_written".into(), serde_json::json!(true));
-    }
     Ok(body)
-}
-
-/// Say more about the two 409s an apply can answer that the person at this
-/// command line can do something about.
-///
-/// The board's own sentence comes first and is kept whole; what is added is
-/// the `tpi` half of it. Anything else, a 409 about something else included,
-/// goes through untouched.
-fn explain_switch_refusal(error: anyhow::Error, args: &SwitchApplyArgs) -> anyhow::Error {
-    let Some(refusal) = error.downcast_ref::<fork::Refusal>() else {
-        return error;
-    };
-    if refusal.status != reqwest::StatusCode::CONFLICT {
-        return error;
-    }
-    let text = refusal.message();
-    // The board offers the way out only in the first of its two refusals over
-    // a hand-written file: the other, an address it cannot read, would not be
-    // helped by the flag, and gets no advice to pass it.
-    if !args.replace_hand_written
-        && text.contains("was written by hand")
-        && text.contains("replace_hand_written")
-    {
-        return anyhow::anyhow!(
-            "{text}\n\nWith --replace-hand-written a confirmed LACP change REPLACES that whole \
-             file (the board keeps a copy beside it). To go ahead, run the same command again \
-             with that flag. Nothing was changed."
-        );
-    }
-    if text.contains("bond0 already exists") {
-        return anyhow::anyhow!(
-            "{text}\n\nThe board will not touch a bond it did not make. If nothing else uses \
-             bond0, remove it on the board (`ip link del bond0`) and apply again; otherwise \
-             choose a preset without lag. Nothing was changed."
-        );
-    }
-    error
 }
 
 /// `tpi network address ...`
@@ -2017,7 +1971,53 @@ fn switch_apply_body(args: &SwitchApplyArgs) -> Result<serde_json::Value> {
     if let Some(window) = args.window {
         body["window_s"] = serde_json::json!(window);
     }
+    // Sent only when asked for. It means yes to replacing an `interfaces` file
+    // somebody wrote by hand, which the board asks about for LACP and for
+    // nothing else; sending it always would answer a question nobody had put.
+    if args.replace_hand_written {
+        let Some(object) = body.as_object_mut() else {
+            bail!("a switch document is a JSON object; --replace-hand-written has nowhere to go.");
+        };
+        object.insert("replace_hand_written".into(), serde_json::json!(true));
+    }
     Ok(body)
+}
+
+/// Say more about the two 409s an apply can answer that the person at this
+/// command line can do something about.
+///
+/// The board's own sentence comes first and is kept whole; what is added is
+/// the `tpi` half of it. Anything else, a 409 about something else included,
+/// goes through untouched.
+fn explain_switch_refusal(error: anyhow::Error, args: &SwitchApplyArgs) -> anyhow::Error {
+    let Some(refusal) = error.downcast_ref::<fork::Refusal>() else {
+        return error;
+    };
+    if refusal.status != reqwest::StatusCode::CONFLICT {
+        return error;
+    }
+    let text = refusal.message();
+    // The board offers the way out only in the first of its two refusals over
+    // a hand-written file: the other, an address it cannot read, would not be
+    // helped by the flag, and gets no advice to pass it.
+    if !args.replace_hand_written
+        && text.contains("was written by hand")
+        && text.contains("replace_hand_written")
+    {
+        return anyhow::anyhow!(
+            "{text}\n\nWith --replace-hand-written a confirmed LACP change REPLACES that whole \
+             file (the board keeps a copy beside it). To go ahead, run the same command again \
+             with that flag. Nothing was changed."
+        );
+    }
+    if text.contains("bond0 already exists") {
+        return anyhow::anyhow!(
+            "{text}\n\nThe board will not touch a bond it did not make. If nothing else uses \
+             bond0, remove it on the board (`ip link del bond0`) and apply again; otherwise \
+             choose a preset without lag. Nothing was changed."
+        );
+    }
+    error
 }
 
 /// `tpi network switch ...`
