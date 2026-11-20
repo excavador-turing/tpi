@@ -577,10 +577,20 @@ pub struct SwitchApplyArgs {
 
     /// How ge1 relates to ge0. Trunk defaults to `redundant` (same VLANs under
     /// spanning tree); `off` leaves ge1 empty; `lag` bonds ge0+ge1 as LACP
-    /// `bond0`. Flat accepts only `lag` (or use `--preset flat-lag`). Split
-    /// refuses this flag.
+    /// `bond0`: both ports must be cabled, and the switch at the other end
+    /// needs LACP (802.3ad) on both of them, or the board is off the network
+    /// until the change reverts. Flat accepts only `lag` (or use `--preset
+    /// flat-lag`). Split refuses this flag.
     #[arg(long, value_name = "MODE")]
     pub second_uplink: Option<SecondUplinkArg>,
+
+    /// LACP only: replace an `interfaces` file somebody wrote by hand. LACP
+    /// needs `bond0` declared in that file, so the board refuses it
+    /// otherwise. A confirmed change replaces the whole file and keeps a copy
+    /// beside it. Every other change leaves a hand-written file alone and
+    /// does not need this.
+    #[arg(long)]
+    pub replace_hand_written: bool,
 
     /// Seconds to confirm within. The board's default is 30.
     #[arg(long, value_name = "SECONDS")]
@@ -611,8 +621,9 @@ pub enum SecondUplinkArg {
     Redundant,
     /// ge1 carries nothing.
     Off,
-    /// ge0 and ge1 are LACP slaves of `bond0`. Confirm needs ifupdown-ng's
-    /// bond executor on the board.
+    /// ge0 and ge1 are LACP slaves of `bond0`. Needs LACP on both ports of
+    /// the switch at the other end, and ifupdown-ng's bond executor on the
+    /// board.
     Lag,
 }
 
