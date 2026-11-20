@@ -556,7 +556,9 @@ pub struct SwitchShowArgs {
 
 #[derive(Args, Clone)]
 pub struct SwitchApplyArgs {
-    /// flat, split or trunk. Mutually exclusive with --table.
+    /// flat, flat-lag, split, trunk or trunk-lag. Mutually exclusive with
+    /// --table. The `-lag` names are the board's preset labels; what is sent
+    /// is still `preset=flat|trunk` with `second_uplink=lag`.
     #[arg(long, value_name = "NAME", conflicts_with = "table")]
     pub preset: Option<SwitchPresetArg>,
 
@@ -564,19 +566,31 @@ pub struct SwitchApplyArgs {
     #[arg(long, value_name = "FILE", conflicts_with = "preset")]
     pub table: Option<PathBuf>,
 
-    /// Trunk only: the VLAN the BMC is on. Yours, because your router has to
-    /// match it.
+    /// Trunk / trunk-lag only: the VLAN the BMC is on. Yours, because your
+    /// router has to match it.
     #[arg(long, value_name = "VID")]
     pub mgmt_vid: Option<u16>,
 
-    /// Trunk only: the VLAN the modules are on.
+    /// Trunk / trunk-lag only: the VLAN the modules are on.
     #[arg(long, value_name = "VID")]
     pub node_vid: Option<u16>,
 
-    /// Trunk only. `redundant` gives ge1 the same VLANs as ge0 under spanning
-    /// tree; `off` leaves ge1 carrying nothing.
+    /// How ge1 relates to ge0. Trunk defaults to `redundant` (same VLANs under
+    /// spanning tree); `off` leaves ge1 empty; `lag` bonds ge0+ge1 as LACP
+    /// `bond0`: both ports must be cabled, and the switch at the other end
+    /// needs LACP (802.3ad) on both of them, or the board is off the network
+    /// until the change reverts. Flat accepts only `lag` (or use `--preset
+    /// flat-lag`). Split refuses this flag.
     #[arg(long, value_name = "MODE")]
     pub second_uplink: Option<SecondUplinkArg>,
+
+    /// LACP only: replace an `interfaces` file somebody wrote by hand. LACP
+    /// needs `bond0` declared in that file, so the board refuses it
+    /// otherwise. A confirmed change replaces the whole file and keeps a copy
+    /// beside it. Every other change leaves a hand-written file alone and
+    /// does not need this.
+    #[arg(long)]
+    pub replace_hand_written: bool,
 
     /// Seconds to confirm within. The board's default is 30.
     #[arg(long, value_name = "SECONDS")]
@@ -587,11 +601,18 @@ pub struct SwitchApplyArgs {
 pub enum SwitchPresetArg {
     /// One network: every module, the BMC and both uplinks share it.
     Flat,
+    /// Flat with ge0 and ge1 bonded as `bond0` (802.3ad LACP).
+    #[value(name = "flat-lag")]
+    FlatLag,
     /// Two networks that never meet: the BMC out of ge0, the modules out of
     /// ge1, nothing tagged.
     Split,
     /// One cable carrying both, tagged, for a router that knows the VLANs.
     Trunk,
+    /// Trunk with the uplink on `bond0` (ge0+ge1 LACP) instead of independent
+    /// cables.
+    #[value(name = "trunk-lag")]
+    TrunkLag,
 }
 
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
@@ -600,6 +621,10 @@ pub enum SecondUplinkArg {
     Redundant,
     /// ge1 carries nothing.
     Off,
+    /// ge0 and ge1 are LACP slaves of `bond0`. Needs LACP on both ports of
+    /// the switch at the other end, and ifupdown-ng's bond executor on the
+    /// board.
+    Lag,
 }
 
 #[derive(Args, Clone)]

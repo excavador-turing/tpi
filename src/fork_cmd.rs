@@ -22,6 +22,7 @@
 use std::io::{IsTerminal, Write};
 
 use anyhow::{bail, Context, Result};
+use clap::ValueEnum;
 use reqwest::{Client, Method};
 
 use crate::cli::{
@@ -1873,6 +1874,17 @@ mod tls_tests {
     }
 }
 
+/// An argument as it is spelled on the command line, which for the switch
+/// arguments is also how the board spells it. One list of names -- clap's --
+/// rather than a second one here to keep in step with it.
+fn cli_name(value: &impl ValueEnum) -> String {
+    value
+        .to_possible_value()
+        .expect("no argument value is skipped")
+        .get_name()
+        .to_string()
+}
+
 /// Build the JSON body an apply takes, or say why the arguments do not make
 /// one.
 ///
@@ -1880,37 +1892,69 @@ mod tls_tests {
 /// part a person gets wrong -- can be tested without a board.
 fn switch_apply_body(args: &SwitchApplyArgs) -> Result<serde_json::Value> {
     let mut body = match (&args.preset, &args.table) {
-        (Some(preset), None) => match preset {
-            SwitchPresetArg::Flat => serde_json::json!({ "preset": "flat" }),
-            SwitchPresetArg::Split => serde_json::json!({ "preset": "split" }),
-            SwitchPresetArg::Trunk => {
-                // Trunk is the only preset with numbers in it, and they are
-                // the operator's: the router on the other end has to agree,
-                // and this tool has no way to know what is free there.
-                let (Some(mgmt), Some(node)) = (args.mgmt_vid, args.node_vid) else {
-                    bail!(
-                        "trunk needs --mgmt-vid and --node-vid. They are the VLANs your router \
-                         uses for this board and its modules, so only you know them."
-                    );
-                };
-                if mgmt == node {
-                    bail!(
-                        "--mgmt-vid and --node-vid are both {mgmt}. They have to differ, or the \
-                         two networks are one network."
-                    );
+        (Some(preset), None) => {
+            // The `-lag` names are the board's list labels, not wire values:
+            // on the wire they are `flat` / `trunk` with `second_uplink: lag`.
+            let name = cli_name(preset);
+            let implies_lag =
+                matches!(preset, SwitchPresetArg::FlatLag | SwitchPresetArg::TrunkLag);
+            let second = match args.second_uplink {
+                Some(other) if implies_lag && other != SecondUplinkArg::Lag => bail!(
+                    "--preset {name} is already lag; omit --second-uplink or pass lag (got {}).",
+                    cli_name(&other)
+                ),
+                None if implies_lag => Some(SecondUplinkArg::Lag),
+                second => second,
+            };
+            match preset {
+                SwitchPresetArg::Flat | SwitchPresetArg::FlatLag => {
+                    let mut body = serde_json::json!({ "preset": "flat" });
+                    match second {
+                        None => {}
+                        Some(SecondUplinkArg::Lag) => body["second_uplink"] = "lag".into(),
+                        Some(other) => bail!(
+                            "flat only takes --second-uplink lag (got {}). Use --preset \
+                             flat-lag, or omit --second-uplink for independent uplinks.",
+                            cli_name(&other)
+                        ),
+                    }
+                    body
                 }
-                let second = match args.second_uplink.unwrap_or(SecondUplinkArg::Redundant) {
-                    SecondUplinkArg::Redundant => "redundant",
-                    SecondUplinkArg::Off => "off",
-                };
-                serde_json::json!({
-                    "preset": "trunk",
-                    "management_vid": mgmt,
-                    "node_vid": node,
-                    "second_uplink": second,
-                })
+                SwitchPresetArg::Split => {
+                    if second.is_some() {
+                        bail!(
+                            "--second-uplink does not apply to split: ge0 and ge1 already carry \
+                             different networks."
+                        );
+                    }
+                    serde_json::json!({ "preset": "split" })
+                }
+                SwitchPresetArg::Trunk | SwitchPresetArg::TrunkLag => {
+                    // Trunk is the only preset with numbers in it, and they are
+                    // the operator's: the router on the other end has to agree,
+                    // and this tool has no way to know what is free there.
+                    let (Some(mgmt), Some(node)) = (args.mgmt_vid, args.node_vid) else {
+                        bail!(
+                            "{name} needs --mgmt-vid and --node-vid. They are the VLANs your \
+                             router uses for this board and its modules, so only you know them."
+                        );
+                    };
+                    if mgmt == node {
+                        bail!(
+                            "--mgmt-vid and --node-vid are both {mgmt}. They have to differ, or \
+                             the two networks are one network."
+                        );
+                    }
+                    let second = second.unwrap_or(SecondUplinkArg::Redundant);
+                    serde_json::json!({
+                        "preset": "trunk",
+                        "management_vid": mgmt,
+                        "node_vid": node,
+                        "second_uplink": cli_name(&second),
+                    })
+                }
             }
-        },
+        }
         (None, Some(path)) => {
             let raw = std::fs::read_to_string(path)
                 .with_context(|| format!("reading {}", path.display()))?;
@@ -1927,7 +1971,53 @@ fn switch_apply_body(args: &SwitchApplyArgs) -> Result<serde_json::Value> {
     if let Some(window) = args.window {
         body["window_s"] = serde_json::json!(window);
     }
+    // Sent only when asked for. It means yes to replacing an `interfaces` file
+    // somebody wrote by hand, which the board asks about for LACP and for
+    // nothing else; sending it always would answer a question nobody had put.
+    if args.replace_hand_written {
+        let Some(object) = body.as_object_mut() else {
+            bail!("a switch document is a JSON object; --replace-hand-written has nowhere to go.");
+        };
+        object.insert("replace_hand_written".into(), serde_json::json!(true));
+    }
     Ok(body)
+}
+
+/// Say more about the two 409s an apply can answer that the person at this
+/// command line can do something about.
+///
+/// The board's own sentence comes first and is kept whole; what is added is
+/// the `tpi` half of it. Anything else, a 409 about something else included,
+/// goes through untouched.
+fn explain_switch_refusal(error: anyhow::Error, args: &SwitchApplyArgs) -> anyhow::Error {
+    let Some(refusal) = error.downcast_ref::<fork::Refusal>() else {
+        return error;
+    };
+    if refusal.status != reqwest::StatusCode::CONFLICT {
+        return error;
+    }
+    let text = refusal.message();
+    // The board offers the way out only in the first of its two refusals over
+    // a hand-written file: the other, an address it cannot read, would not be
+    // helped by the flag, and gets no advice to pass it.
+    if !args.replace_hand_written
+        && text.contains("was written by hand")
+        && text.contains("replace_hand_written")
+    {
+        return anyhow::anyhow!(
+            "{text}\n\nWith --replace-hand-written a confirmed LACP change REPLACES that whole \
+             file (the board keeps a copy beside it). To go ahead, run the same command again \
+             with that flag. Nothing was changed."
+        );
+    }
+    if text.contains("bond0 already exists") {
+        return anyhow::anyhow!(
+            "{text}\n\nThe board will not touch a bond it did not make. If nothing else uses \
+             bond0, remove it on the board (`ip link del bond0`) and apply again; otherwise \
+             choose a preset without lag. Nothing was changed."
+        );
+    }
+    error
 }
 
 /// `tpi network switch ...`
@@ -1964,7 +2054,8 @@ pub async fn switch_cmd(
                 Some(&body),
                 "switch apply",
             )
-            .await?
+            .await
+            .map_err(|error| explain_switch_refusal(error, args))?
         }
         SwitchCmd::Confirm(args) => {
             let body = serde_json::json!({ "token": args.token });
@@ -2056,17 +2147,44 @@ fn vlan_label(names: Option<&serde_json::Map<String, serde_json::Value>>, vid: u
 
 /// One line per port: what it is untagged in, what it carries tagged.
 fn print_switch_ports(document: &serde_json::Value) {
+    for line in switch_ports_lines(document) {
+        println!("{line}");
+    }
+}
+
+/// [`print_switch_ports`], as lines, so what it says can be tested.
+fn switch_ports_lines(document: &serde_json::Value) -> Vec<String> {
+    let mut lines = Vec::new();
     let filtering = document
         .get("vlan_filtering")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    // Only lag is worth a word: the board writes `second_uplink` into every
+    // document, `redundant` under plain flat included, where it means nothing.
+    let lag = document
+        .get("second_uplink")
+        .and_then(serde_json::Value::as_str)
+        == Some("lag");
     if !filtering {
-        println!("  one network; the switch does not look at VLANs");
-        return;
+        if lag {
+            lines.push("  one network; uplink is bond0 (LACP)".to_string());
+        } else {
+            lines.push("  one network; the switch does not look at VLANs".to_string());
+            return lines;
+        }
+    }
+    if lag {
+        // The table has two empty rows next to bond0, which reads as a fault
+        // to anybody who does not know what a bond does to its members.
+        lines.push(
+            "  ge0 and ge1 are the two LACP members of bond0, so their rows carry nothing of \
+             their own; the VLANs are on bond0"
+                .to_string(),
+        );
     }
     let names = document.get("names").and_then(serde_json::Value::as_object);
     let Some(ports) = document.get("ports").and_then(serde_json::Value::as_object) else {
-        return;
+        return lines;
     };
     for (name, config) in ports {
         let untagged = config
@@ -2089,11 +2207,12 @@ fn print_switch_ports(document: &serde_json::Value) {
         } else {
             format!("  tagged {}", tagged.join(", "))
         };
-        println!("  {name:<8} untagged {untagged}{tagged}");
+        lines.push(format!("  {name:<8} untagged {untagged}{tagged}"));
     }
     if let Some(stp) = document.get("stp").and_then(serde_json::Value::as_bool) {
-        println!("  {:<8} {}", "stp", if stp { "on" } else { "off" });
+        lines.push(format!("  {:<8} {}", "stp", if stp { "on" } else { "off" }));
     }
+    lines
 }
 
 fn print_switch_state(value: &serde_json::Value) {
@@ -2240,8 +2359,11 @@ mod switch_table_tests {
 
 #[cfg(test)]
 mod switch_tests {
-    use super::switch_apply_body;
+    use super::{explain_switch_refusal, switch_apply_body, switch_ports_lines};
     use crate::cli::{SecondUplinkArg, SwitchApplyArgs, SwitchPresetArg};
+    use crate::fork::Refusal;
+    use reqwest::StatusCode;
+    use serde_json::json;
 
     fn args() -> SwitchApplyArgs {
         SwitchApplyArgs {
@@ -2250,6 +2372,7 @@ mod switch_tests {
             mgmt_vid: None,
             node_vid: None,
             second_uplink: None,
+            replace_hand_written: false,
             window: None,
         }
     }
@@ -2317,6 +2440,283 @@ mod switch_tests {
         })
         .expect("valid");
         assert_eq!(body["second_uplink"], "off");
+    }
+
+    /// The board's list labels `flat-lag` / `trunk-lag` are not wire values:
+    /// what goes on the wire is still `preset: flat|trunk` with
+    /// `second_uplink: lag`, matching what GET …/presets puts in `preset`.
+    #[test]
+    fn flat_lag_sends_flat_with_second_uplink_lag() {
+        for (preset, second_uplink) in [
+            (SwitchPresetArg::FlatLag, None),
+            (SwitchPresetArg::Flat, Some(SecondUplinkArg::Lag)),
+            (SwitchPresetArg::FlatLag, Some(SecondUplinkArg::Lag)),
+        ] {
+            let body = switch_apply_body(&SwitchApplyArgs {
+                preset: Some(preset),
+                second_uplink,
+                ..args()
+            })
+            .expect("valid");
+            assert_eq!(body["preset"], "flat");
+            assert_eq!(body["second_uplink"], "lag");
+        }
+    }
+
+    #[test]
+    fn trunk_lag_sends_trunk_with_second_uplink_lag() {
+        for (preset, second_uplink) in [
+            (SwitchPresetArg::TrunkLag, None),
+            (SwitchPresetArg::Trunk, Some(SecondUplinkArg::Lag)),
+            (SwitchPresetArg::TrunkLag, Some(SecondUplinkArg::Lag)),
+        ] {
+            let body = switch_apply_body(&SwitchApplyArgs {
+                preset: Some(preset),
+                mgmt_vid: Some(10),
+                node_vid: Some(20),
+                second_uplink,
+                ..args()
+            })
+            .expect("valid");
+            assert_eq!(body["preset"], "trunk");
+            assert_eq!(body["second_uplink"], "lag");
+            assert_eq!(body["management_vid"], 10);
+            assert_eq!(body["node_vid"], 20);
+        }
+    }
+
+    #[test]
+    fn flat_refuses_a_second_uplink_that_is_not_lag() {
+        let error = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::Flat),
+            second_uplink: Some(SecondUplinkArg::Redundant),
+            ..args()
+        })
+        .expect_err("flat only takes lag");
+        assert!(format!("{error}").contains("flat only takes --second-uplink lag"));
+    }
+
+    #[test]
+    fn split_refuses_second_uplink() {
+        let error = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::Split),
+            second_uplink: Some(SecondUplinkArg::Lag),
+            ..args()
+        })
+        .expect_err("split has no second uplink mode");
+        assert!(format!("{error}").contains("does not apply to split"));
+    }
+
+    /// Plain flat leaves the second uplink to the board rather than sending a
+    /// value: only lag changes what flat means.
+    #[test]
+    fn plain_flat_sends_no_second_uplink() {
+        let body = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::Flat),
+            ..args()
+        })
+        .expect("valid");
+        assert!(body.get("second_uplink").is_none());
+    }
+
+    #[test]
+    fn a_lag_preset_refuses_a_conflicting_second_uplink() {
+        for (preset, name) in [
+            (SwitchPresetArg::FlatLag, "flat-lag"),
+            (SwitchPresetArg::TrunkLag, "trunk-lag"),
+        ] {
+            let error = switch_apply_body(&SwitchApplyArgs {
+                preset: Some(preset),
+                mgmt_vid: Some(10),
+                node_vid: Some(20),
+                second_uplink: Some(SecondUplinkArg::Off),
+                ..args()
+            })
+            .expect_err("a -lag preset is already lag");
+            assert!(format!("{error}").contains(&format!("--preset {name} is already lag")));
+        }
+    }
+
+    #[test]
+    fn trunk_lag_without_its_vlans_names_the_preset_given() {
+        let error = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::TrunkLag),
+            ..args()
+        })
+        .expect_err("trunk-lag needs numbers");
+        assert!(format!("{error}").starts_with("trunk-lag needs --mgmt-vid"));
+    }
+
+    #[test]
+    fn replace_hand_written_is_sent_only_when_asked_for() {
+        let without = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::FlatLag),
+            ..args()
+        })
+        .expect("valid");
+        assert!(without.get("replace_hand_written").is_none());
+
+        let with = switch_apply_body(&SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::FlatLag),
+            replace_hand_written: true,
+            ..args()
+        })
+        .expect("valid");
+        assert_eq!(with["replace_hand_written"], true);
+        assert_eq!(
+            with["second_uplink"], "lag",
+            "the rest of the body is as before"
+        );
+    }
+
+    #[test]
+    fn replace_hand_written_goes_into_a_table_too() {
+        let dir = std::env::temp_dir().join(format!("tpi-switch-rhw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doc.json");
+        std::fs::write(&path, br#"{"vlan_filtering":false,"ports":{}}"#).unwrap();
+
+        let body = switch_apply_body(&SwitchApplyArgs {
+            table: Some(path),
+            replace_hand_written: true,
+            ..args()
+        })
+        .expect("valid");
+        assert_eq!(body["replace_hand_written"], true);
+        assert_eq!(body["vlan_filtering"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn refusal(status: StatusCode, text: &str) -> anyhow::Error {
+        Refusal::new(status, format!("switch apply: {text}")).into()
+    }
+
+    const HAND_WRITTEN: &str = "/etc/network/interfaces was written by hand, and LACP needs \
+        bond0 declared in it. To go ahead, pass `--replace-hand-written` to `tpi`, or send \
+        `replace_hand_written: true` in the request. Nothing was changed.";
+
+    #[test]
+    fn a_hand_written_refusal_says_the_file_is_replaced_and_names_the_flag() {
+        let error = explain_switch_refusal(
+            refusal(StatusCode::CONFLICT, HAND_WRITTEN),
+            &SwitchApplyArgs {
+                preset: Some(SwitchPresetArg::FlatLag),
+                ..args()
+            },
+        );
+        let text = format!("{error}");
+        assert!(text.starts_with("switch apply: /etc/network/interfaces was written by hand"));
+        assert!(text.contains("REPLACES that whole file"));
+        assert!(text.contains("run the same command again with that flag"));
+    }
+
+    #[test]
+    fn a_hand_written_refusal_is_left_alone_when_the_flag_was_already_given() {
+        // The board refuses a second time for an address it cannot read, and
+        // there the flag does not help: no advice to pass it again.
+        let unreadable = "/etc/network/interfaces was written by hand and the address in its \
+            br0 stanza cannot be read. Nothing was changed.";
+        for text in [HAND_WRITTEN, unreadable] {
+            let error = explain_switch_refusal(
+                refusal(StatusCode::CONFLICT, text),
+                &SwitchApplyArgs {
+                    preset: Some(SwitchPresetArg::FlatLag),
+                    replace_hand_written: true,
+                    ..args()
+                },
+            );
+            assert_eq!(format!("{error}"), format!("switch apply: {text}"));
+        }
+    }
+
+    #[test]
+    fn an_unreadable_address_does_not_suggest_the_flag() {
+        let unreadable = "/etc/network/interfaces was written by hand and the address in its \
+            br0 stanza cannot be read. Nothing was changed.";
+        let error = explain_switch_refusal(
+            refusal(StatusCode::CONFLICT, unreadable),
+            &SwitchApplyArgs {
+                preset: Some(SwitchPresetArg::FlatLag),
+                ..args()
+            },
+        );
+        assert!(!format!("{error}").contains("--replace-hand-written"));
+    }
+
+    #[test]
+    fn an_existing_bond_says_what_to_do_about_it() {
+        let error = explain_switch_refusal(
+            refusal(
+                StatusCode::CONFLICT,
+                "bond0 already exists on this board and this daemon did not create it.",
+            ),
+            &SwitchApplyArgs {
+                preset: Some(SwitchPresetArg::FlatLag),
+                ..args()
+            },
+        );
+        let text = format!("{error}");
+        assert!(text.contains("bond0 already exists"));
+        assert!(text.contains("ip link del bond0"));
+        assert!(text.contains("a preset without lag"));
+    }
+
+    #[test]
+    fn other_refusals_pass_through_untouched() {
+        let a = SwitchApplyArgs {
+            preset: Some(SwitchPresetArg::FlatLag),
+            ..args()
+        };
+        // A 409 about something else, and the same words under another status.
+        for (status, text) in [
+            (StatusCode::CONFLICT, "there is no br0 to change"),
+            (StatusCode::BAD_REQUEST, HAND_WRITTEN),
+        ] {
+            let error = explain_switch_refusal(refusal(status, text), &a);
+            assert_eq!(format!("{error}"), format!("switch apply: {text}"));
+        }
+        // And an error that is not a refusal at all.
+        let error = explain_switch_refusal(anyhow::anyhow!("connection refused"), &a);
+        assert_eq!(format!("{error}"), "connection refused");
+    }
+
+    #[test]
+    fn a_lag_document_says_ge0_and_ge1_are_bond_members() {
+        let trunk_lag = json!({
+            "vlan_filtering": true,
+            "second_uplink": "lag",
+            "ports": {
+                "bond0": { "untagged": null, "tagged": [10, 20] },
+                "ge0": { "untagged": null, "tagged": [] },
+                "ge1": { "untagged": null, "tagged": [] },
+            },
+        });
+        let lines = switch_ports_lines(&trunk_lag);
+        assert!(lines[0].contains("ge0 and ge1 are the two LACP members of bond0"));
+        assert!(lines.iter().any(|l| l.contains("bond0")));
+
+        let flat_lag = json!({ "vlan_filtering": false, "second_uplink": "lag", "ports": {} });
+        let lines = switch_ports_lines(&flat_lag);
+        assert_eq!(lines[0], "  one network; uplink is bond0 (LACP)");
+        assert!(lines[1].contains("LACP members of bond0"));
+    }
+
+    #[test]
+    fn a_document_without_lag_has_no_bond_note() {
+        let trunk = json!({
+            "vlan_filtering": true,
+            "second_uplink": "redundant",
+            "ports": { "ge0": { "untagged": 10, "tagged": [20] } },
+        });
+        assert!(!switch_ports_lines(&trunk)
+            .iter()
+            .any(|l| l.contains("LACP")));
+
+        let flat = json!({ "vlan_filtering": false, "second_uplink": "redundant" });
+        assert_eq!(
+            switch_ports_lines(&flat),
+            vec!["  one network; the switch does not look at VLANs".to_string()]
+        );
     }
 
     #[test]

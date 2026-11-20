@@ -394,6 +394,37 @@ fn factory_password_refusal(
     )
 }
 
+/// A board's refusal: its sentence, and the status it came with.
+///
+/// Prints as the sentence alone, exactly as the plain `bail!` it replaces did.
+/// The status is kept so that a caller which knows what a particular 409 means
+/// can say more, by `downcast_ref` on the error, without reading the status
+/// back out of text.
+#[derive(Debug)]
+pub struct Refusal {
+    pub status: reqwest::StatusCode,
+    message: String,
+}
+
+impl Refusal {
+    pub fn new(status: reqwest::StatusCode, message: String) -> Self {
+        Self { status, message }
+    }
+
+    /// The board's sentence, with the command prefix.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
 async fn unwrap(
     req: Request,
     client: &Client,
@@ -454,7 +485,7 @@ async fn unwrap(
         // escaped and buried, which is how a perfectly clear refusal reads as
         // a parser error.
         if let Some(detail) = body.get("detail").and_then(|d| d.as_str()) {
-            bail!("{what}: {detail}");
+            return Err(Refusal::new(status, format!("{what}: {detail}")).into());
         }
 
         // bmcd puts its refusal in the body; the status alone ("400 Bad
@@ -478,7 +509,7 @@ async fn unwrap(
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| body.to_string());
-        bail!("{what}: {detail}");
+        return Err(Refusal::new(status, format!("{what}: {detail}")).into());
     }
 
     // The legacy API wraps an answer as `{"response":[{"result": ...}]}`, and
