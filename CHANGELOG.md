@@ -15,6 +15,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v1.11.1] — 2026-11-21
+
+`tpi reboot --help` says what is true of both board revisions.
+
 ### Fixed
 
 - **`tpi reboot --help` now says what happens on both board revisions.** It
