@@ -144,16 +144,18 @@ pub enum Commands {
     /// Print turing-pi info
     Info,
 
-    /// Reboot the BMC. The compute modules keep running throughout.
+    /// Reboot the BMC. On a v2.5 board the compute modules keep running; on a v2.4 board they are power-cycled.
     ///
     /// Only this interface, the API and the consoles go away, for about half
-    /// a minute. The daemon's own summary says the same thing, and it has
-    /// been measured on every firmware flash this estate has done: all four
-    /// modules stayed powered and their Kubernetes nodes never restarted.
+    /// a minute. On a v2.5 board the daemon adopts the live power state when
+    /// it comes back up, and this has been measured on every firmware flash
+    /// this estate has done: all four modules stayed powered and their
+    /// Kubernetes nodes never restarted. On a v2.4 board the same reboot
+    /// power-cycles all four compute modules, so shut them down first.
     ///
-    /// This help used to say the nodes would lose power. They do not, and a
-    /// warning that overstates the blast radius talks people out of a reboot
-    /// they should do.
+    /// This help used to say the nodes would lose power on every board. That
+    /// overstates the blast radius on v2.5, where a warning talks people out
+    /// of a reboot they should do, and the opposite claim is wrong on v2.4.
     Reboot,
 }
 

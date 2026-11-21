@@ -15,6 +15,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`tpi reboot --help` now says what happens on both board revisions.** It
+  claimed the compute modules keep running throughout. That is true on a v2.5
+  board, where the daemon adopts the live power state; on a v2.4 board a BMC
+  reboot power-cycles all four modules. Help text only.
+
 ## [v1.11.0] — 2026-11-20
 
 `tpi network switch` can set up an LACP uplink. It is
