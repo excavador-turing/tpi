@@ -19,6 +19,7 @@ use crate::cli::{
 use crate::cli::{FlashArgs, UsbCmd};
 use crate::fork_cmd;
 use crate::request::Request;
+use crate::tls_verify;
 use anyhow::{bail, ensure, Context};
 use indicatif::{HumanBytes, ProgressBar, ProgressState, ProgressStyle};
 use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
@@ -27,6 +28,7 @@ use reqwest::{Body, Client, ClientBuilder};
 use std::fmt::Write;
 use std::path::Path;
 use std::str::from_utf8;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -47,21 +49,45 @@ pub struct LegacyHandler {
     json: bool,
     skip_request: bool,
     version: ApiVersion,
+    tls_report: Option<Arc<tls_verify::Report>>,
 }
 
 impl LegacyHandler {
-    fn create_client(version: ApiVersion) -> anyhow::Result<Client> {
+    fn create_client(
+        version: ApiVersion,
+        host: &str,
+        args: &Cli,
+    ) -> anyhow::Result<(Client, Option<Arc<tls_verify::Report>>)> {
         if version == ApiVersion::V1 {
-            return Ok(Client::new());
+            if args.pin.is_some() {
+                eprintln!("Warning: --pin has no effect over http, and nothing is remembered");
+            }
+            return Ok((Client::new(), None));
         }
 
-        let client = ClientBuilder::new()
+        let builder = ClientBuilder::new()
             .gzip(true)
-            .danger_accept_invalid_certs(true)
             .http1_only()
-            .https_only(true)
-            .build()?;
-        Ok(client)
+            .https_only(true);
+        let given = args
+            .pin
+            .as_deref()
+            .map(tls_verify::parse_fingerprint)
+            .transpose()?;
+        let typed_host = args.host.as_deref().unwrap_or(host);
+        let target = tls_verify::Target::new(host, version.scheme(), typed_host, args.port);
+        // The localhost build talks to the daemon on this machine. Skipping
+        // is limited to those two addresses; a name still has to verify.
+        let localhost_build = cfg!(feature = "localhost");
+        match tls_verify::mode(&target, host, args.insecure, localhost_build, given)? {
+            tls_verify::Mode::Skip => {
+                Ok((builder.danger_accept_invalid_certs(true).build()?, None))
+            }
+            tls_verify::Mode::Verify(expected) => {
+                let (config, report) = tls_verify::client_config(target, expected)?;
+                Ok((builder.use_preconfigured_tls(config).build()?, Some(report)))
+            }
+        }
     }
 
     pub fn new(host: String, args: &Cli) -> anyhow::Result<Self> {
@@ -78,8 +104,8 @@ impl LegacyHandler {
                 )
             })
             .unwrap_or("TPI".to_string());
-        let request = Request::new(host, version, creds, &user_agent)?;
-        let client = Self::create_client(version)?;
+        let request = Request::new(host.clone(), version, creds, &user_agent)?;
+        let (client, tls_report) = Self::create_client(version, &host, args)?;
 
         Ok(Self {
             request,
@@ -88,7 +114,13 @@ impl LegacyHandler {
             json,
             skip_request: false,
             version,
+            tls_report,
         })
+    }
+
+    /// What the certificate check refused, for the command's error message.
+    pub fn tls_report(&self) -> Option<Arc<tls_verify::Report>> {
+        self.tls_report.clone()
     }
 
     /// Handler for CLI commands. Responses are printed to stdout and need to be formatted

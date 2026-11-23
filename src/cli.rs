@@ -63,6 +63,20 @@ pub struct Cli {
     #[arg(long, global = true, env = "TPI_OUTPUT_JSON")]
     pub json: bool,
 
+    /// Do not check the server certificate. Without this, verification is on,
+    /// and a self-signed board is accepted once its fingerprint is given with
+    /// `--pin`.
+    #[arg(long, global = true)]
+    pub insecure: bool,
+
+    /// SHA-256 fingerprint of the board's certificate. Compare it first with
+    /// BMC-UI (Security, Certificates) or, on the board's serial console,
+    /// `openssl x509 -in /etc/ssl/certs/bmcd_cert.pem -noout -fingerprint
+    /// -sha256`. It is accepted only if the certificate presented now has
+    /// this fingerprint; then its public key is remembered for this host.
+    #[arg(long, global = true, value_name = "FINGERPRINT")]
+    pub pin: Option<String>,
+
     /// Force which version of the BMC API to use. Try lower the version if you are running
     /// older BMC firmware.
     #[arg(default_value = "v1-1", short, global = true)]
