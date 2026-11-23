@@ -490,12 +490,14 @@ impl LegacyHandler {
 
         let progress_watcher = self.create_progress_watching_thread(handle_id);
 
-        progress_watcher.await.expect("failed to wait for thread");
+        progress_watcher
+            .await
+            .context("failed to wait for thread")??;
 
         Ok(())
     }
 
-    fn create_progress_watching_thread(&self, handle_id: u64) -> JoinHandle<()> {
+    fn create_progress_watching_thread(&self, handle_id: u64) -> JoinHandle<anyhow::Result<()>> {
         Self::watch_flash_progress(&self.request, &self.client, handle_id)
     }
 
@@ -509,7 +511,7 @@ impl LegacyHandler {
         request: &Request,
         client: &Client,
         handle_id: u64,
-    ) -> JoinHandle<()> {
+    ) -> JoinHandle<anyhow::Result<()>> {
         let initial_delay = Duration::from_secs(3);
         let update_period = Duration::from_millis(500);
 
@@ -533,61 +535,52 @@ impl LegacyHandler {
                     .clone()
                     .send(client.clone())
                     .await
-                    .expect("Failed to send progress status request");
+                    .context("Failed to send progress status request")?;
 
                 let status = response.status();
                 let json = response
                     .json::<serde_json::Value>()
                     .await
-                    .expect("Failed to parse response as JSON");
+                    .context("Failed to parse response as JSON")?;
 
-                if !status.is_success() {
-                    if let Some(err) = json.get("response") {
-                        println!("Error: {}", err);
-                    }
-                    panic!("Failed to get flashing progress: {}", status);
-                }
+                match read_flash_status(status, &json)? {
+                    FlashProgress::Transferring {
+                        id,
+                        file_size,
+                        bytes_written,
+                    } => {
+                        if id != handle_id {
+                            bail!("Invalid flashing handle");
+                        }
 
-                if let Some(map) = json.get("Transferring") {
-                    let id = get_json_num(map, "id");
-                    assert_eq!(id, handle_id, "Invalid flashing handle");
-
-                    let file_size = get_json_num(map, "size");
-
-                    if let Some(bar) = &mut bar {
-                        let bytes_written = get_json_num(map, "bytes_written");
-
-                        if bytes_written >= file_size {
-                            if !verifying {
-                                bar.finish_and_clear();
-                                *bar = build_spinner();
-                                bar.set_message("Verifying checksum...");
-                                verifying = true;
+                        if let Some(bar) = &mut bar {
+                            let Some(bytes_written) = bytes_written else {
+                                bail!("API error: expected `bytes_written` key");
+                            };
+                            if bytes_written >= file_size {
+                                if !verifying {
+                                    bar.finish_and_clear();
+                                    *bar = build_spinner();
+                                    bar.set_message("Verifying checksum...");
+                                    verifying = true;
+                                }
+                            } else {
+                                bar.set_position(bytes_written);
                             }
                         } else {
-                            bar.set_position(bytes_written);
+                            bar = Some(build_progress_bar(file_size));
                         }
-                    } else {
-                        bar = Some(build_progress_bar(file_size));
+
+                        sleep(update_period).await;
                     }
-
-                    sleep(update_period).await;
-                    continue;
+                    FlashProgress::Done => {
+                        println!("Done");
+                        break;
+                    }
                 }
-
-                if json.get("Done").is_some() {
-                    println!("Done");
-                    break;
-                }
-
-                if let Some(map) = json.get("Error") {
-                    eprintln!("Error occured during flashing: {}", map);
-                    return;
-                }
-
-                eprintln!("Unexpected response: {:#?}", json);
-                return;
             }
+
+            Ok(())
         })
     }
 
@@ -646,7 +639,9 @@ impl LegacyHandler {
         multipart_request.send(self.client.clone()).await?;
 
         let progress_watcher = self.create_progress_watching_thread(handle);
-        progress_watcher.await.expect("failed to wait for thread");
+        progress_watcher
+            .await
+            .context("failed to wait for thread")??;
 
         Ok(())
     }
@@ -994,9 +989,80 @@ fn get_json_str<'m>(map: &'m serde_json::Value, key: &str) -> &'m str {
         .unwrap_or_else(|| panic!("API error: `{}` is not a string", key))
 }
 
+#[derive(Debug)]
+enum FlashProgress {
+    Transferring {
+        id: u64,
+        file_size: u64,
+        bytes_written: Option<u64>,
+    },
+    Done,
+}
+
+/// Turns one progress response into the next step. A reported flash error is
+/// a failure, so the process can exit non-zero instead of returning success.
+fn read_flash_status(
+    status: reqwest::StatusCode,
+    json: &serde_json::Value,
+) -> anyhow::Result<FlashProgress> {
+    if !status.is_success() {
+        if let Some(err) = json.get("response") {
+            println!("Error: {err}");
+        }
+        bail!("Failed to get flashing progress: {status}");
+    }
+
+    if let Some(map) = json.get("Transferring") {
+        return Ok(FlashProgress::Transferring {
+            id: get_json_num(map, "id"),
+            file_size: get_json_num(map, "size"),
+            bytes_written: map.get("bytes_written").and_then(|v| v.as_u64()),
+        });
+    }
+
+    if json.get("Done").is_some() {
+        return Ok(FlashProgress::Done);
+    }
+
+    if let Some(map) = json.get("Error") {
+        bail!("Error occured during flashing: {map}");
+    }
+
+    bail!("Unexpected response: {json:#?}");
+}
+
 fn get_json_num(map: &serde_json::Value, key: &str) -> u64 {
     map.get(key)
         .unwrap_or_else(|| panic!("API error: expected `{}` key", key))
         .as_u64()
         .unwrap_or_else(|| panic!("API error: `{}` is not a number", key))
+}
+
+#[cfg(test)]
+mod flash_status_tests {
+    use super::{read_flash_status, FlashProgress};
+    use reqwest::StatusCode;
+
+    #[test]
+    fn a_reported_flash_error_is_a_failure() {
+        let json = serde_json::json!({"Error": "disk"});
+        let err = read_flash_status(StatusCode::OK, &json).unwrap_err();
+        assert!(err.to_string().contains("Error occured during flashing"));
+    }
+
+    #[test]
+    fn an_http_error_is_a_failure() {
+        let json = serde_json::json!({"response": "nope"});
+        let err = read_flash_status(StatusCode::INTERNAL_SERVER_ERROR, &json).unwrap_err();
+        assert!(err.to_string().contains("Failed to get flashing progress"));
+    }
+
+    #[test]
+    fn done_is_success() {
+        let json = serde_json::json!({"Done": true});
+        assert!(matches!(
+            read_flash_status(StatusCode::OK, &json).unwrap(),
+            FlashProgress::Done
+        ));
+    }
 }

@@ -493,7 +493,7 @@ pub async fn install(
             .context("the board accepted the image but named no transfer to follow")?;
         crate::legacy_handler::LegacyHandler::watch_flash_progress(request, client, handle)
             .await
-            .context("waiting for the flash to finish")?;
+            .context("waiting for the flash to finish")??;
     }
 
     println!("staged {staged_version}; reboot to take it");

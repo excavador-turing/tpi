@@ -14,17 +14,31 @@
 
 use std::io::{stdout, Write};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Error, Result};
 use crossterm::cursor::MoveToColumn;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::style::Print;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
 use crossterm::{execute, queue};
 
+/// Ctrl+C. Not a line the caller should treat as Enter.
+#[derive(Debug)]
+struct Interrupted;
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("interrupted")
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
 struct Prompt {
     msg: &'static str,
     password: bool,
-    input: String,
+    /// Characters, so the cursor is a character index. `String::insert` and
+    /// `remove` index bytes, and a non-ASCII character makes those disagree.
+    input: Vec<char>,
     cursor_idx: usize,
 }
 
@@ -33,9 +47,13 @@ impl Prompt {
         Self {
             msg,
             password,
-            input: String::new(),
+            input: Vec::new(),
             cursor_idx: 0,
         }
+    }
+
+    fn text(&self) -> String {
+        self.input.iter().collect()
     }
 
     fn read(&mut self) -> Result<String> {
@@ -43,10 +61,11 @@ impl Prompt {
 
         let res = self.read_loop();
 
-        disable_raw_mode()?;
+        let _ = disable_raw_mode();
 
         match res {
-            Ok(()) => Ok(self.input.clone()),
+            Ok(()) => Ok(self.text()),
+            Err(e) if e.is::<Interrupted>() => Err(e),
             Err(e) => bail!("failed to get terminal event: {e}"),
         }
     }
@@ -80,7 +99,7 @@ impl Prompt {
             let column = self.msg.len() + self.cursor_idx + 2;
             let column = u16::try_from(column).unwrap_or(0);
 
-            queue!(stdout(), Print(&self.input), MoveToColumn(column))?;
+            queue!(stdout(), Print(self.text()), MoveToColumn(column))?;
         }
 
         stdout().flush()?;
@@ -89,29 +108,26 @@ impl Prompt {
     }
 
     fn handle_key(&mut self, key: event::KeyEvent) -> Result<bool> {
-        let interrupt = key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c');
-
-        if interrupt || key.code == KeyCode::Enter {
-            execute!(stdout(), Print("\n\r"))?;
-            return Ok(false);
+        match decide(&key) {
+            LineEnd::Abort => {
+                execute!(stdout(), Print("\n\r"))?;
+                return Err(Error::new(Interrupted));
+            }
+            LineEnd::Submit => {
+                execute!(stdout(), Print("\n\r"))?;
+                return Ok(false);
+            }
+            LineEnd::Edit => {}
         }
 
         match key.code {
-            KeyCode::Char(c) => {
-                self.input.insert(self.cursor_idx, c);
-                self.cursor_idx += 1;
-            }
+            KeyCode::Char(c) => self.insert_char(c),
             KeyCode::Delete => {
                 if !self.input.is_empty() {
                     self.delete();
                 }
             }
-            KeyCode::Backspace => {
-                if !self.input.is_empty() {
-                    self.left();
-                    self.delete();
-                }
-            }
+            KeyCode::Backspace => self.backspace(),
             KeyCode::Left => self.left(),
             KeyCode::Right if self.can_move_right() => {
                 self.cursor_idx += 1;
@@ -120,6 +136,18 @@ impl Prompt {
         }
 
         Ok(true)
+    }
+
+    fn insert_char(&mut self, c: char) {
+        self.input.insert(self.cursor_idx, c);
+        self.cursor_idx += 1;
+    }
+
+    fn backspace(&mut self) {
+        if !self.input.is_empty() {
+            self.left();
+            self.delete();
+        }
     }
 
     /// Whether the cursor has somewhere to the right to go.
@@ -155,15 +183,34 @@ pub fn password(msg: &'static str) -> Result<String> {
     Prompt::new(msg, true).read()
 }
 
+/// What a key does to the line, before any character is edited.
+enum LineEnd {
+    Edit,
+    Submit,
+    Abort,
+}
+
+fn decide(key: &event::KeyEvent) -> LineEnd {
+    let interrupt = key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c');
+    if interrupt {
+        LineEnd::Abort
+    } else if key.code == KeyCode::Enter {
+        LineEnd::Submit
+    } else {
+        LineEnd::Edit
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Prompt;
+    use super::{decide, LineEnd, Prompt};
+    use crossterm::event::{self, KeyCode, KeyModifiers};
 
     fn at(input: &str, cursor_idx: usize) -> Prompt {
         Prompt {
             msg: "",
             password: false,
-            input: input.to_string(),
+            input: input.chars().collect(),
             cursor_idx,
         }
     }
@@ -195,5 +242,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_non_ascii_character_is_one_character_for_the_next_key() {
+        let mut prompt = at("", 0);
+        prompt.insert_char('ä');
+        prompt.insert_char('b');
+        assert_eq!(prompt.text(), "äb");
+    }
+
+    #[test]
+    fn backspace_removes_the_whole_non_ascii_character() {
+        let mut prompt = at("", 0);
+        prompt.insert_char('ä');
+        prompt.backspace();
+        assert_eq!(prompt.text(), "");
+        assert_eq!(prompt.cursor_idx, 0);
+    }
+
+    #[test]
+    fn control_c_aborts_and_enter_submits() {
+        let abort = event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let submit = event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(decide(&abort), LineEnd::Abort));
+        assert!(matches!(decide(&submit), LineEnd::Submit));
     }
 }
