@@ -14,11 +14,12 @@
 
 //! Wrapper for `reqwest::Request` that asks for authentication if needed.
 
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::ops::{Deref, DerefMut};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use reqwest::header::{HeaderValue, USER_AGENT};
 use reqwest::multipart::Form;
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
@@ -156,7 +157,7 @@ impl Request {
 
             let resp = builder.send().await?;
             if resp.status() == StatusCode::UNAUTHORIZED {
-                delete_cached_token();
+                delete_cached_token(&self.host, self.ver);
                 authenticated = true;
             } else {
                 break resp;
@@ -172,8 +173,10 @@ impl Request {
             return request_token(&self.host, self.ver, &self.creds, client).await;
         }
 
-        // Else, try retrieving cached token from a file
-        if let Some(token) = get_cached_token() {
+        // Else, try retrieving cached token from a file. A token is never
+        // read for plain HTTP: the cache is per https host, and an http
+        // request must not present it.
+        if let Some(token) = get_cached_token(&self.host, self.ver) {
             return Ok(token);
         }
 
@@ -225,24 +228,43 @@ fn url_from_host(host: &str, scheme: &str) -> Result<Url> {
     Ok(url)
 }
 
-fn get_cached_token() -> Option<String> {
-    let path = get_cache_file_location();
-    let file = std::fs::read_to_string(path);
-
-    file.ok()
+/// `scheme://host:port`, default port included, IPv6 bracketed.
+fn token_endpoint(host: &str, ver: ApiVersion) -> String {
+    match url_from_host(host, ver.scheme()) {
+        Ok(url) => {
+            let port = url.port_or_known_default().unwrap_or(0);
+            let name = url.host_str().unwrap_or(host);
+            if name.contains(':') {
+                format!("{}://[{name}]:{port}", ver.scheme())
+            } else {
+                format!("{}://{name}:{port}", ver.scheme())
+            }
+        }
+        Err(_) => format!("{}://{host}", ver.scheme()),
+    }
 }
 
-fn delete_cached_token() {
-    let _ = std::fs::remove_file(get_cache_file_location());
+fn get_cached_token(host: &str, ver: ApiVersion) -> Option<String> {
+    if ver == ApiVersion::V1 {
+        return None;
+    }
+    let path = token_file(host, ver)?;
+    fs::read_to_string(path).ok()
 }
 
-fn get_cache_file_location() -> PathBuf {
-    let default = PathBuf::from(".");
-    let mut path = dirs::cache_dir().unwrap_or(default);
+fn delete_cached_token(host: &str, ver: ApiVersion) {
+    if let Some(path) = token_file(host, ver) {
+        let _ = fs::remove_file(path);
+    }
+}
 
-    path.push("tpi_token");
+/// None when there is no cache directory. The token is not written to `.`.
+fn token_file(host: &str, ver: ApiVersion) -> Option<PathBuf> {
+    dirs::cache_dir().map(|root| token_file_at(&root, &token_endpoint(host, ver)))
+}
 
-    path
+fn token_file_at(root: &Path, key: &str) -> PathBuf {
+    root.join("tpi").join("tokens").join(hex::encode(key))
 }
 
 async fn request_token(
@@ -291,9 +313,8 @@ async fn request_token(
             let token = get_param(&json, "id");
 
             if save_token {
-                if let Err(e) = cache_token(&token) {
-                    let path = get_cache_file_location();
-                    println!("Warning: failed to write to cache file {:?}: {}", path, e);
+                if let Err(e) = cache_token(host, ver, &token) {
+                    println!("Warning: the token was not cached: {e:#}");
                 }
             }
 
@@ -318,15 +339,198 @@ fn get_param(results: &serde_json::Value, key: &str) -> String {
         .to_owned()
 }
 
-fn cache_token(token: &str) -> Result<()> {
-    let path = get_cache_file_location();
+fn cache_token(host: &str, ver: ApiVersion, token: &str) -> Result<()> {
+    cache_token_in(
+        dirs::cache_dir().as_deref(),
+        ver,
+        &token_endpoint(host, ver),
+        token,
+    )
+}
 
-    std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)?
-        .write_all(token.as_bytes())?;
+fn cache_token_in(root: Option<&Path>, ver: ApiVersion, key: &str, token: &str) -> Result<()> {
+    if ver == ApiVersion::V1 {
+        return Ok(());
+    }
+    let Some(root) = root else {
+        anyhow::bail!("no cache directory, so the token was not written");
+    };
+    cache_token_at(root, key, token)
+}
 
+/// The single token file of earlier versions, sent to whatever --host was in
+/// use. Removed once a per-host token has been written in its place.
+const LEGACY_TOKEN_FILE: &str = "tpi_token";
+
+fn cache_token_at(root: &Path, key: &str, token: &str) -> Result<()> {
+    let path = token_file_at(root, key);
+    // The cache directory itself is the system's, and may not exist yet.
+    fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
+    let tpi = root.join("tpi");
+    private_dir(&tpi)?;
+    private_dir(&tpi.join("tokens"))?;
+    write_private(&path, token.as_bytes())?;
+    let _ = fs::remove_file(root.join(LEGACY_TOKEN_FILE));
     Ok(())
+}
+
+/// Create `path` mode 0700, or tighten it to 0700 if it is already a
+/// directory. A symbolic link is refused, not followed.
+fn private_dir(path: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let meta = fs::symlink_metadata(path)
+                .with_context(|| format!("checking {}", path.display()))?;
+            if !meta.is_dir() {
+                bail!(
+                    "{} is not a directory (a symbolic link is not followed)",
+                    path.display()
+                );
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                    .with_context(|| format!("restricting {}", path.display()))?;
+            }
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| format!("creating {}", path.display())),
+    }
+}
+
+/// Write mode 0600 to a fresh temporary name, then rename it over `path`.
+/// `create_new` refuses an existing name, link or not, and the rename
+/// replaces a link at `path` rather than writing through it.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{} has no file name", path.display()))?;
+    let temp = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&temp);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options
+        .open(&temp)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&temp, path));
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(error).with_context(|| format!("writing {}", path.display()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_token_is_keyed_by_scheme_host_and_port() {
+        assert_eq!(
+            token_endpoint("board.local", ApiVersion::V1_1),
+            "https://board.local:443"
+        );
+        assert_ne!(
+            token_endpoint("board.local", ApiVersion::V1_1),
+            token_endpoint("other.local", ApiVersion::V1_1)
+        );
+        assert_ne!(
+            token_endpoint("board.local", ApiVersion::V1_1),
+            token_endpoint("board.local:8443", ApiVersion::V1_1)
+        );
+    }
+
+    #[test]
+    fn a_cached_token_is_mode_0600_in_a_directory_mode_0700() {
+        let root = std::env::temp_dir().join(format!("tpi-token-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let key = token_endpoint("board.local", ApiVersion::V1_1);
+        cache_token_at(&root, &key, "secret").unwrap();
+        let path = token_file_at(&root, &key);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "secret");
+        let other = token_file_at(&root, &token_endpoint("other.local", ApiVersion::V1_1));
+        assert!(!other.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(mode(&root.join("tpi")), 0o700);
+            assert_eq!(mode(&root.join("tpi").join("tokens")), 0o700);
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_first_per_host_token_removes_the_old_single_file() {
+        let root = std::env::temp_dir().join(format!("tpi-legacy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // The cache directory need not exist yet; then there is nothing to remove.
+        let key = token_endpoint("board.local", ApiVersion::V1_1);
+        cache_token_at(&root, &key, "first").unwrap();
+        fs::write(root.join(LEGACY_TOKEN_FILE), "old").unwrap();
+        cache_token_at(&root, &key, "secret").unwrap();
+        assert!(!root.join(LEGACY_TOKEN_FILE).exists());
+        assert_eq!(
+            fs::read_to_string(token_file_at(&root, &key)).unwrap(),
+            "secret"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_token_path_is_replaced_and_not_written_through() {
+        let root = std::env::temp_dir().join(format!("tpi-token-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let key = token_endpoint("board.local", ApiVersion::V1_1);
+        cache_token_at(&root, &key, "first").unwrap();
+        let path = token_file_at(&root, &key);
+        fs::remove_file(&path).unwrap();
+        let victim = root.join("victim");
+        fs::write(&victim, "untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        cache_token_at(&root, &key, "secret").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
+        assert!(!fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "secret");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn http_never_reads_or_writes_a_token_and_no_cache_dir_means_no_file() {
+        assert!(get_cached_token("board.local", ApiVersion::V1).is_none());
+        assert!(cache_token_in(None, ApiVersion::V1, "http://board.local:80", "secret").is_ok());
+        let error = cache_token_in(None, ApiVersion::V1_1, "https://board.local:443", "secret")
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("no cache directory"),
+            "{error:#}"
+        );
+        assert!(!PathBuf::from("tpi_token").exists());
+    }
 }
