@@ -50,22 +50,25 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # actions-rs/toolchain and actions-rs/cargo were archived in 2022. The
+      # 1.98.1 branch of dtolnay/rust-toolchain installs exactly that
+      # toolchain, matching rust-toolchain.toml.
       - name: Install Toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
-          toolchain: '1.98.1'
-          default: true
-          profile: minimal
-          target: ${{ matrix.target }}
+          targets: ${{ matrix.target }}
+
+      # actions-rs/cargo's use-cross installed the latest cross from
+      # crates.io, which is 0.2.5. The same version, pinned and locked.
+      - name: Install cross
+        if: ${{ matrix.cross }}
+        run: cargo install cross --version 0.2.5 --locked
 
       - name: Build
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: --release --locked --target=${{ matrix.target }}
-          use-cross: ${{ matrix.cross }}
+        shell: bash
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --locked --target ${{ matrix.target }}
 
       - name: Create Unix Archive
         if: ${{ !contains(matrix.target, 'windows') }}
@@ -79,7 +82,7 @@ jobs:
           tar -czf tpi-${{ matrix.target }}.tar.gz -C ${pkgdir} .
 
       - name: Upload Archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ !contains(matrix.target, 'windows') }}
         with:
           name: ${{ matrix.target }}
@@ -87,7 +90,7 @@ jobs:
             tpi-${{ matrix.target }}.tar.gz
 
       - name: Upload Archive (Win)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ contains(matrix.target, 'windows') }}
         with:
           name: ${{ matrix.target }}
@@ -109,11 +112,11 @@ jobs:
             arch: arm64
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ matrix.target }}-unknown-linux-gnu
 
@@ -134,7 +137,7 @@ jobs:
       - run: dpkg-deb --build ${{ env.PKG_NAME }}
 
       - name: Upload Archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ env.PKG_NAME }}.deb
           path: ${{ env.PKG_NAME }}.deb
@@ -156,7 +159,7 @@ jobs:
     permissions:
       contents: write   # the release itself; nothing else writes
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -175,7 +178,7 @@ jobs:
           echo "tag and manifest agree on ${version}"
 
       - name: Download artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.1.8
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           merge-multiple: true
@@ -189,6 +192,8 @@ jobs:
           [ "$count" -gt 0 ] || { echo "::error::no artifacts to attach"; exit 1; }
           echo "attaching $count artifact(s):"
           find artifacts -type f -printf '  %p (%s bytes)\n'
+          # Checksums sit beside the archives. The sums file is not hashed.
+          (cd artifacts && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum) > artifacts/SHA256SUMS
 
       - name: Release
         uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0

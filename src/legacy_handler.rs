@@ -58,6 +58,11 @@ impl LegacyHandler {
         host: &str,
         args: &Cli,
     ) -> anyhow::Result<(Client, Option<Arc<tls_verify::Report>>)> {
+        // reqwest 0.13 no longer selects a rustls crypto provider. Ring is
+        // the provider the 0.12 rustls backend used, and it cross-compiles
+        // for the board. aws-lc does not. The certificate check installs it
+        // again; the V1 client is built before that.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         if version == ApiVersion::V1 {
             if args.pin.is_some() {
                 eprintln!("Warning: --pin has no effect over http, and nothing is remembered");
