@@ -18,6 +18,7 @@ mod fork_cmd;
 mod legacy_handler;
 mod prompt;
 mod request;
+mod tls_verify;
 
 use crate::legacy_handler::LegacyHandler;
 use clap::{CommandFactory, Parser};
@@ -43,11 +44,9 @@ async fn main() -> ExitCode {
         Err(e) => {
             // stderr, not stdout: an error printed to stdout is swallowed by
             // `tpi --json ... | jq` and shows up as a parse failure instead.
-            if let Some(error) = e.downcast_ref::<reqwest::Error>() {
-                eprintln!("{error}");
-            } else {
-                eprintln!("{:#}", e);
-            }
+            // The whole chain: reqwest's own text is "error sending request
+            // for url (...)", and the cause is in its sources.
+            eprintln!("{e:#}");
             ExitCode::FAILURE
         }
     }
@@ -93,5 +92,13 @@ async fn execute_cli_command(cli: &Cli) -> anyhow::Result<u8> {
         host.push_str(&format!(":{}", port));
     }
 
-    LegacyHandler::new(host, cli)?.handle_cmd(command).await
+    let handler = LegacyHandler::new(host, cli)?;
+    let tls_report = handler.tls_report();
+    handler
+        .handle_cmd(command)
+        .await
+        .map_err(|error| match &tls_report {
+            Some(report) => report.explain(error),
+            None => error,
+        })
 }
