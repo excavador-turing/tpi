@@ -1,3 +1,9 @@
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2025-0119", reason = "indicatif 0.17.11 depends on number_prefix, which has no patched release" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4 is a direct dependency and has no patched release" },
+]
+
 [licenses]
 allow = [
     "MIT",
@@ -9,6 +15,7 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "Unicode-DFS-2016",
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 
@@ -19,4 +26,3 @@ expression = "MIT AND ISC AND OpenSSL"
 license-files = [
     { path = "LICENSE", hash = 0xbd0eed23 }
 ]
-
