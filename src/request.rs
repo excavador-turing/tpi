@@ -142,7 +142,11 @@ impl Request {
     pub async fn send(mut self, client: Client) -> Result<Response> {
         let mut authenticated = cfg!(not(feature = "localhost"));
 
+        let mut retried_unauthorized = false;
+
         let resp = loop {
+            // `take` below spends the upload. A retry after that posts an empty body.
+            let body_spent = self.multipart.is_some();
             let mut builder =
                 RequestBuilder::from_parts(client.clone(), self.inner.try_clone().unwrap());
 
@@ -156,9 +160,12 @@ impl Request {
             }
 
             let resp = builder.send().await?;
-            if resp.status() == StatusCode::UNAUTHORIZED {
+            if resp.status() == StatusCode::UNAUTHORIZED
+                && retry_after_unauthorized(retried_unauthorized, body_spent)
+            {
                 delete_cached_token(&self.host, self.ver);
                 authenticated = true;
+                retried_unauthorized = true;
             } else {
                 break resp;
             }
@@ -242,6 +249,12 @@ fn token_endpoint(host: &str, ver: ApiVersion) -> String {
         }
         Err(_) => format!("{}://{host}", ver.scheme()),
     }
+}
+
+/// A 401 is sent again once. It is not sent again when this attempt already
+/// posted the upload body, because that body cannot be built a second time.
+fn retry_after_unauthorized(already_retried: bool, body_spent: bool) -> bool {
+    !already_retried && !body_spent
 }
 
 fn get_cached_token(host: &str, ver: ApiVersion) -> Option<String> {
@@ -532,5 +545,17 @@ mod tests {
             "{error:#}"
         );
         assert!(!PathBuf::from("tpi_token").exists());
+    }
+
+    #[test]
+    fn a_401_is_retried_once() {
+        assert!(retry_after_unauthorized(false, false));
+        assert!(!retry_after_unauthorized(true, false));
+    }
+
+    #[test]
+    fn a_401_is_not_retried_after_the_body_was_sent() {
+        assert!(!retry_after_unauthorized(false, true));
+        assert!(!retry_after_unauthorized(true, true));
     }
 }
