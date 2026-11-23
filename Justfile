@@ -33,7 +33,7 @@ test:
 
 # Licences, bans and sources
 deny:
-    cargo deny check bans licenses sources
+    cargo deny check advisories bans licenses sources
 
 # The workstation binary, as a release would build it
 build:
