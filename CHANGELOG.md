@@ -15,6 +15,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v2.0.1] — 2026-11-24
+
+A refactor, with no change in behaviour. Thank you,
+[@danste22](https://github.com/danste22).
+
+### Changed
+
+- **The token and certificate-pin file helpers exist once.** `private_dir`,
+  `write_private` and the endpoint key lived twice, in `request.rs` and in
+  `tls_verify.rs`; they are now in `src/cache.rs` and both modules use them
+  from there. Token and pin files keep their names, paths and modes (0600
+  files, 0700 directories) and are still written through a rename. Authored by
+  [@danste22](https://github.com/danste22) in
+  [#33](https://github.com/excavador-turing/tpi/pull/33), for BMC-Firmware
+  [#115](https://github.com/excavador-turing/BMC-Firmware/issues/115).
+
 ## [v2.0.0] — 2026-11-24
 
 A security release. Every fix here comes from
