@@ -22,6 +22,11 @@ BMC-Firmware#124, and to Adrian Berger
 ([@adberger](https://github.com/adberger)), whose simulation found that
 `install --force` was refused by the board it was offered by (#128).
 
+Thank you, [@danste22](https://github.com/danste22), for
+[BMC-Firmware#123](https://github.com/excavador-turing/BMC-Firmware/issues/123),
+which found the AUR workflow that never ran and the install instructions that
+pointed at upstream.
+
 ### Added
 
 - **`tpi firmware unstage` cancels a staged update**
@@ -35,12 +40,36 @@ BMC-Firmware#124, and to Adrian Berger
   cancel. Needs bmcd 2.51.0 or newer on the board; an older one is told so
   instead of answering "Invalid `type` parameter".
 
+### Removed
+
+- **The AUR workflow, and the files only it used.** `aur_upload.yml` was meant
+  to publish each release to the AUR packages `tpi`, `tpi-bin` and `tpi-git`.
+  It never ran (the release is created with the default `GITHUB_TOKEN`, and
+  GitHub does not start other workflows from events that token causes, so
+  `release: created` never fired), it could not have published (those packages
+  belong to upstream's maintainer, and the deploy key is theirs), and it would
+  have built the wrong thing (its sources point at `turing-machines/tpi`, where
+  this fork's tags do not exist; a local replay also showed the `tpi-git` job
+  failing on an empty `pkgver` and `entry_point.sh` writing `sha256sums`
+  twice). Gone with it: `scripts/ci/PKGBUILD`, `scripts/ci/PKGBUILD.bin` and
+  `scripts/ci/entry_point.sh`. `scripts/ci/install` stays, `release.yml` uses
+  it. This supersedes BMC-Firmware#111, which pinned the actions of the
+  workflow that is now removed. (BMC-Firmware#123)
+
 ### Changed
 
 - **`install --force` cancels what is staged, then installs**
   (BMC-Firmware#128, Adrian Berger). The flag is unchanged; the board now does
   the same on `firmware_install` as it already did for an uploaded image. If the
   install fails nothing is staged, and `unstage` cancels without installing.
+- **The install instructions point at this fork.** The README's Installation
+  section listed channels that all install upstream `tpi` 1.0.x: the binaries
+  and apt repository at `firmware.turingpi.com`, `cargo install tpi`
+  (crates.io) and the AUR. It now names this fork's GitHub releases (archives,
+  `.deb` and `SHA256SUMS`), `cargo install --git
+  https://github.com/excavador-turing/tpi` and a build from source, and says in
+  one paragraph that the packages elsewhere are upstream's and cannot change
+  state on a board running bmcd 2.49.0 or later. (BMC-Firmware#123)
 
 ## [v2.0.1] — 2026-11-24
 

@@ -58,62 +58,59 @@ Things to know:
 
 ## Installation
 
-`tpi` binaries can be downloaded from various channels depending on
-which OS you are running. Choose one of the following:
+`tpi` is built and released by this fork. Its releases are at
+<https://github.com/excavador-turing/tpi/releases>.
 
-### pre build 
+### Prebuilt binaries
 
-prebuild binaries can be downloaded from the following URL:
-https://firmware.turingpi.com/tpi
+Each release carries an archive per platform and a `SHA256SUMS` file:
 
-We have binaries for Windows, Mac and Linux
+- Linux: `tpi-x86_64-unknown-linux-gnu.tar.gz` and
+  `tpi-aarch64-unknown-linux-gnu.tar.gz`. Unpack with
+  `sudo tar -xzf <archive> -C /` to install under `/usr`, or take
+  `usr/bin/tpi` out of it.
+- macOS: `tpi-aarch64-apple-darwin.tar.gz` (Apple silicon) and
+  `tpi-x86_64-apple-darwin.tar.gz` (Intel).
+- Windows: `tpi.exe`.
 
-### Debian
+Check what you downloaded against `SHA256SUMS` before you run it.
 
-Add turing-machines debian repository to your sources.list once:
+### Debian and Ubuntu
+
+Each release has a `.deb` for `amd64` (`tpi-<version>-x86_64-linux.deb`) and
+for `arm64` (`tpi-<version>-aarch64-linux.deb`):
 
 ```shell
-deb https://firmware.turingpi.com/tpi/debian ./ >> /etc/apt/sources.list
-sudo apt-get update
+sudo apt install ./tpi-<version>-x86_64-linux.deb
 ```
 
-You can now install the tpi package with command:
-
-```shell
-sudo apt-get install tpi
-```
+There is no apt repository for this fork.
 
 ### Cargo
 
-Rust users can install from source using the following command:
+Rust users can build and install from source:
 
 ```shell
-cargo install tpi
+cargo install --git https://github.com/excavador-turing/tpi
 ```
 
-### Arch User Repository (AUR)
+### Packages that are not this fork's
 
-The package is available in the [AUR](https://aur.archlinux.org/packages/tpi).
-Use your favourite AUR helper to install:
+The `tpi` packages on the AUR, on crates.io (`cargo install tpi`), in
+Nixpkgs and at `firmware.turingpi.com` (the prebuilt binaries and the apt
+repository) are upstream's. They install upstream's `tpi`, not this fork's (the
+AUR and crates.io are at 1.0.7). It lacks this fork's changes, such as
+certificate checking and POST state changes, and it cannot change anything on a
+board running bmcd 2.49.0 or later: that daemon refuses a state change over
+GET.
 
-e.g. with yay:
+### Building from source
 
 ```shell
-yay -S tpi
+git clone https://github.com/excavador-turing/tpi
+cd tpi
+cargo build --release
 ```
 
-### NixOS
-
-The package is available in [Nixpkgs](https://search.nixos.org/packages?show=tpi). To try it out, you can run `tpi` in a nix-shell:
-
-```
-nix-shell -p tpi
-```
-
-### getting Master
-
-The GitHub action runner builds Windows, Linux and macOS packages on every
-commit to `master`. Take a look at the artifacts of any [workflow
-runs](https://github.com/turing-machines/tpi/actions/workflows/build.yml) to
-download them.
+The binary is `target/release/tpi`.
 
