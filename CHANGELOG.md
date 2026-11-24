@@ -15,6 +15,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: `tpi` verifies the board's certificate.**
+  [@danste22](https://github.com/danste22)'s security review
+  ([#21](https://github.com/excavador-turing/tpi/pull/21)). The client used
+  to accept any certificate, so a peer answering to the board's name received
+  the password and the token. A self-signed board is now accepted once its
+  SHA-256 fingerprint is given with `--pin` (or `TPI_PIN`), after you compared
+  it with BMC-UI (Security, Certificates) or the board's console. tpi then
+  remembers the board's public key per scheme, host and port, so a renewal
+  that keeps the key keeps the pin. `--insecure` (or `TPI_INSECURE`) skips the
+  check. Existing scripts need one pin per board; see "Upgrading: certificate
+  verification" in the README. The localhost build skips only for `127.0.0.1`
+  and `::1`.
+- A refused certificate now prints the endpoint, the fingerprint it presented,
+  where to compare it and the command to pin it. A changed key shows both
+  fingerprints. Every error prints its whole cause chain.
+- A stored pin is strict and wins over a CA-signed chain. The refusal messages
+  print the pin file; deleting it forgets the pin.
+
 ## [v1.11.1] — 2026-11-21
 
 `tpi reboot --help` says what is true of both board revisions.

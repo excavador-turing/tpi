@@ -8,6 +8,11 @@
 //! `scheme://host:port`. The board keeps its key when it renews its own
 //! certificate, so the pin outlives a renewal.
 //!
+//! A stored pin is strict: it wins over a CA-signed chain, so after a board
+//! gets a certificate from a CA the operator deletes the pin file (the error
+//! messages print its path) or pins the new key. Deleting the file is the
+//! way to forget a pin; there is no separate command for it.
+//!
 //! `--insecure` is the only other way to skip. The localhost build may also
 //! skip, and only for `127.0.0.1` and `::1`, which is the on-board client
 //! talking to itself.
@@ -311,8 +316,17 @@ fn check_on_board() -> String {
     )
 }
 
+/// Where the pin for this endpoint lives, or says there is no such file.
+fn pin_location(target: &Target) -> String {
+    match &target.pin_file {
+        Some(path) => path.display().to_string(),
+        None => "(none: there is no cache directory)".to_string(),
+    }
+}
+
 fn describe(target: &Target, failure: &Failure) -> String {
     let endpoint = &target.endpoint;
+    let location = pin_location(target);
     match failure {
         Failure::Untrusted { presented } => {
             let presented = format_fingerprint(presented);
@@ -320,7 +334,9 @@ fn describe(target: &Target, failure: &Failure) -> String {
                 "error: {endpoint} presented a certificate tpi does not trust.\n  \
                  SHA-256: {presented}\n  \
                  Check it on the board ({}).\n  \
-                 If it matches:  tpi {} --pin {presented} info",
+                 If it matches:  tpi {} --pin {presented} info\n  \
+                 (or set TPI_PIN to the fingerprint). The pin is then kept in\n  \
+                 {location}",
                 check_on_board(),
                 target.host_args
             )
@@ -338,7 +354,11 @@ fn describe(target: &Target, failure: &Failure) -> String {
                  firmware made a new key each time it renewed its own certificate, 30 days\n  \
                  before expiry. If one of those happened, check the new fingerprint on the\n  \
                  board ({}),\n  \
-                 and re-run with --pin. Otherwise the connection may be intercepted.",
+                 and re-run with --pin (or TPI_PIN). Otherwise the connection may be\n  \
+                 intercepted.\n  \
+                 The pin is kept in {location}. A stored pin is strict: it is used\n  \
+                 even if the board now has a CA-signed certificate. Delete that file\n  \
+                 to forget the pin.",
                 format_fingerprint(presented),
                 check_on_board()
             )
@@ -347,7 +367,8 @@ fn describe(target: &Target, failure: &Failure) -> String {
             "error: {endpoint} presented a certificate that is not the one given with --pin.\n  \
              --pin:     {}\n  \
              presented: {}\n  \
-             Nothing was remembered. Check the fingerprint on the board ({}).",
+             Nothing was remembered, and the pin file ({location}) is as it was.\n  \
+             Check the fingerprint on the board ({}).",
             format_fingerprint(given),
             format_fingerprint(presented),
             check_on_board()
@@ -780,6 +801,11 @@ mod tests {
         let (result, report) = verify(Expected::Roots, target(&root));
         assert!(result.is_err());
         let text = format!("{:#}", report.explain(anyhow!("error sending request")));
+        // The pin file is where `--pin` will write; the text must name it.
+        assert!(
+            text.contains(&target(&root).pin_file.unwrap().display().to_string()),
+            "{text}"
+        );
         assert_eq!(
             text,
             format!(
@@ -787,7 +813,10 @@ mod tests {
                  SHA-256: {BOARD_CERT_SHA256}\n  \
                  Check it on the board (BMC-UI › Security › Certificates, or on the serial console:\n  \
                  openssl x509 -in /etc/ssl/certs/bmcd_cert.pem -noout -fingerprint -sha256).\n  \
-                 If it matches:  tpi --host turingpi.local --pin {BOARD_CERT_SHA256} info"
+                 If it matches:  tpi --host turingpi.local --pin {BOARD_CERT_SHA256} info\n  \
+                 (or set TPI_PIN to the fingerprint). The pin is then kept in\n  \
+                 {}",
+                target(&root).pin_file.unwrap().display()
             )
         );
         let _ = fs::remove_dir_all(&root);
@@ -818,6 +847,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("tpi tls install"), "{text}");
+        // And it names the file to delete to forget the pin.
+        let file = target(&root).pin_file.unwrap().display().to_string();
+        assert!(text.contains(&format!("kept in {file}")), "{text}");
+        assert!(text.contains("Delete that file"), "{text}");
         let _ = fs::remove_dir_all(&root);
     }
 
