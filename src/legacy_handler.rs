@@ -60,7 +60,7 @@ impl LegacyHandler {
     ) -> anyhow::Result<(Client, Option<Arc<tls_verify::Report>>)> {
         if version == ApiVersion::V1 {
             if args.pin.is_some() {
-                eprintln!("Warning: --pin has no effect over http, and nothing is remembered");
+                eprintln!("Warning: --pin (or TPI_PIN) has no effect over http, and nothing is remembered");
             }
             return Ok((Client::new(), None));
         }
@@ -72,6 +72,8 @@ impl LegacyHandler {
         let given = args
             .pin
             .as_deref()
+            // An empty TPI_PIN is "not set", not a fingerprint of no digits.
+            .filter(|text| !text.trim().is_empty())
             .map(tls_verify::parse_fingerprint)
             .transpose()?;
         let typed_host = args.host.as_deref().unwrap_or(host);
