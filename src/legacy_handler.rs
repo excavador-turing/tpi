@@ -188,6 +188,9 @@ impl LegacyHandler {
                 Some(FirmwareCmd::Check) => {
                     return fork_cmd::check(&self.request, &self.client, self.json).await
                 }
+                Some(FirmwareCmd::Unstage) => {
+                    return fork_cmd::unstage(&self.request, &self.client, self.json).await
+                }
                 Some(FirmwareCmd::Install(a)) => {
                     return fork_cmd::install(&self.request, &self.client, a, self.json).await
                 }
@@ -214,7 +217,7 @@ impl LegacyHandler {
                         .await?
                 }
                 (None, None) => bail!(
-                    "`tpi firmware` needs a subcommand: list, check, install, sources or upload"
+                    "`tpi firmware` needs a subcommand: list, check, install, unstage, sources or upload"
                 ),
                 _ => unreachable!("handled above"),
             },

@@ -306,6 +306,16 @@ pub enum FirmwareCmd {
     #[command(arg_required_else_help = true)]
     Install(InstallArgs),
 
+    /// Cancel a staged update: the next boot starts the firmware that is
+    /// running.
+    ///
+    /// Takes back an image that `upload` or `install` staged and that has not
+    /// been rebooted into. Refused while an install is still writing, and while
+    /// the new firmware is being checked on its first boot; nothing is changed
+    /// then, and trying again later is the whole remedy. With nothing staged it
+    /// says so and succeeds.
+    Unstage,
+
     /// Ask whether a newer release exists.
     ///
     /// Exits 10 when one does, so `tpi firmware check || notify` works in
@@ -363,7 +373,9 @@ pub struct InstallArgs {
     /// the same version.
     #[arg(short, long)]
     pub source: Option<String>,
-    /// Replace an update that is already staged for the next boot.
+    /// Cancel an update that is already staged for the next boot, then install
+    /// this one. If the install fails nothing is staged: use
+    /// `tpi firmware unstage` to cancel without installing.
     #[arg(long)]
     pub force: bool,
     /// Do not ask for confirmation.
