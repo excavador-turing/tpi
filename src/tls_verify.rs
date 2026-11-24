@@ -17,8 +17,7 @@
 //! skip, and only for `127.0.0.1` and `::1`, which is the on-board client
 //! talking to itself.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -30,28 +29,13 @@ use rustls::{
     CertificateError, ClientConfig, DigitallySignedStruct, Error, RootCertStore, SignatureScheme,
 };
 
+use crate::cache::{endpoint_key, private_dir, write_private};
+
 /// Where the board keeps the certificate it serves.
 const BOARD_CERT_PATH: &str = "/etc/ssl/certs/bmcd_cert.pem";
 
 /// A SHA-256 digest: of a certificate, or of its public key.
 pub(crate) type Digest = [u8; 32];
-
-/// `https://host:port`, with a bracketed IPv6 host. The default port is filled
-/// in, so `turingpi.local` and `turingpi.local:443` share one pin.
-pub(crate) fn endpoint_key(host: &str, scheme: &str) -> String {
-    match url::Url::parse(&format!("{scheme}://{host}/")) {
-        Ok(url) => {
-            let port = url.port_or_known_default().unwrap_or(0);
-            let name = url.host_str().unwrap_or(host);
-            if name.contains(':') {
-                format!("{scheme}://[{name}]:{port}")
-            } else {
-                format!("{scheme}://{name}:{port}")
-            }
-        }
-        Err(_) => format!("{scheme}://{host}"),
-    }
-}
 
 pub(crate) fn is_loopback_host(host: &str) -> bool {
     let name = if let Some(rest) = host.strip_prefix('[') {
@@ -415,72 +399,6 @@ fn write_pin(path: &Path, pin: StoredPin) -> Result<()> {
         private_dir(pins)?;
     }
     write_private(path, pin.to_text().as_bytes())
-}
-
-/// Create `path` mode 0700, or tighten it to 0700 if it is already a
-/// directory. A symbolic link is refused, not followed.
-fn private_dir(path: &Path) -> Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    match builder.create(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let meta = fs::symlink_metadata(path)
-                .with_context(|| format!("checking {}", path.display()))?;
-            if !meta.is_dir() {
-                anyhow::bail!(
-                    "{} is not a directory (a symbolic link is not followed)",
-                    path.display()
-                );
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-                    .with_context(|| format!("restricting {}", path.display()))?;
-            }
-            Ok(())
-        }
-        Err(error) => Err(error).with_context(|| format!("creating {}", path.display())),
-    }
-}
-
-/// Write mode 0600 to a fresh temporary name, then rename it over `path`.
-/// `create_new` refuses an existing name, link or not, and the rename
-/// replaces a link at `path` rather than writing through it.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| anyhow!("{} has no file name", path.display()))?;
-    let temp = path.with_file_name(format!(
-        ".{}.{}.tmp",
-        name.to_string_lossy(),
-        std::process::id()
-    ));
-    let _ = fs::remove_file(&temp);
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let written = options
-        .open(&temp)
-        .and_then(|mut file| {
-            file.write_all(bytes)?;
-            file.sync_all()
-        })
-        .and_then(|()| fs::rename(&temp, path));
-    if let Err(error) = written {
-        let _ = fs::remove_file(&temp);
-        return Err(error).with_context(|| format!("writing {}", path.display()));
-    }
-    Ok(())
 }
 
 /// A client config whose verifier checks `expected` and records any refusal

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod cache;
 mod cli;
 mod fork;
 mod fork_cmd;
