@@ -15,25 +15,75 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v2.0.0] — 2026-11-24
+
+A security release. Every fix here comes from
+[@danste22](https://github.com/danste22)'s review of the client
+(BMC-Firmware [#90](https://github.com/excavador-turing/BMC-Firmware/issues/90),
+[#92](https://github.com/excavador-turing/BMC-Firmware/issues/92),
+[#94](https://github.com/excavador-turing/BMC-Firmware/issues/94),
+[#98](https://github.com/excavador-turing/BMC-Firmware/issues/98),
+[#99](https://github.com/excavador-turing/BMC-Firmware/issues/99),
+[#101](https://github.com/excavador-turing/BMC-Firmware/issues/101)), carried
+in as pull requests here with his commits kept under his authorship. Thank
+you, Daniel.
+
+It is 2.0.0 because certificate verification breaks scripts: see
+"Upgrading: certificate verification" in the README.
+
 ### Changed
 
-- **Breaking: `tpi` verifies the board's certificate.**
-  [@danste22](https://github.com/danste22)'s security review
-  ([#21](https://github.com/excavador-turing/tpi/pull/21)). The client used
-  to accept any certificate, so a peer answering to the board's name received
-  the password and the token. A self-signed board is now accepted once its
-  SHA-256 fingerprint is given with `--pin` (or `TPI_PIN`), after you compared
-  it with BMC-UI (Security, Certificates) or the board's console. tpi then
-  remembers the board's public key per scheme, host and port, so a renewal
-  that keeps the key keeps the pin. `--insecure` (or `TPI_INSECURE`) skips the
-  check. Existing scripts need one pin per board; see "Upgrading: certificate
-  verification" in the README. The localhost build skips only for `127.0.0.1`
-  and `::1`.
-- A refused certificate now prints the endpoint, the fingerprint it presented,
-  where to compare it and the command to pin it. A changed key shows both
-  fingerprints. Every error prints its whole cause chain.
-- A stored pin is strict and wins over a CA-signed chain. The refusal messages
-  print the pin file; deleting it forgets the pin.
+- **Breaking: `tpi` verifies the board's certificate.** The client used to
+  accept any certificate, so a peer answering to the board's name received the
+  password and the token. A self-signed board is now accepted once its SHA-256
+  fingerprint is given with `--pin` (or `TPI_PIN`), after you compared it with
+  BMC-UI (Security, Certificates) or the board's console. tpi then remembers
+  the board's public key per scheme, host and port, so a renewal that keeps
+  the key keeps the pin. `--insecure` (or `TPI_INSECURE`) skips the check.
+  Every existing script needs one pin per board. The localhost build skips only
+  for `127.0.0.1` and `::1`. ([#21](https://github.com/excavador-turing/tpi/pull/21),
+  carried on as [#27](https://github.com/excavador-turing/tpi/pull/27))
+- A refused certificate prints the endpoint, the fingerprint it presented,
+  where to compare it, the command to pin it and the pin file. A changed key
+  shows both fingerprints. Every error prints its whole cause chain.
+- A stored pin is strict and wins over a CA-signed chain. Deleting its file,
+  whose path the refusals print, forgets it.
+- **Breaking: the login token is cached per board.** One file per
+  `scheme://host:port`, mode 0600, in a directory mode 0700, and sent only
+  back to the host that issued it. After the update you log in once again, per
+  board. Over plain `http` no token is kept or sent, so the password is asked
+  on every call. The old shared `tpi_token` is removed.
+  ([#22](https://github.com/excavador-turing/tpi/pull/22), carried on as
+  [#29](https://github.com/excavador-turing/tpi/pull/29))
+- State changes go as POST. A board that answers 405, an older bmcd, gets the
+  identical request once more as GET. The localhost build (the one on the
+  board) sends the board's own token, `/run/bmcd/local-token`, to `127.0.0.1`
+  or `::1` when no credentials are given; a name such as `localhost` is not
+  enough. ([#26](https://github.com/excavador-turing/tpi/pull/26), carried on
+  as [#31](https://github.com/excavador-turing/tpi/pull/31))
+- tpi is built on reqwest 0.13 with the ring crypto provider, as before; unused
+  crates are gone, `cargo deny` also checks advisories, and the release
+  binaries are size-optimised.
+  ([#25](https://github.com/excavador-turing/tpi/pull/25), carried on as
+  [#28](https://github.com/excavador-turing/tpi/pull/28))
+
+### Fixed
+
+- **A failed `tpi flash` exits 1.** It exited 0 when the flash did not finish.
+  ([#24](https://github.com/excavador-turing/tpi/pull/24), carried on as
+  [#30](https://github.com/excavador-turing/tpi/pull/30))
+- Editing a non-ASCII character at the password prompt no longer panics, and
+  Ctrl+C at the prompt aborts instead of returning what was typed. A 401 is
+  retried once, and not after an upload body was sent.
+- The lockfile is refreshed inside the current requirements.
+  ([#23](https://github.com/excavador-turing/tpi/pull/23))
+
+### Added
+
+- The release carries a `SHA256SUMS` file beside the archives and packages;
+  check a download with `sha256sum -c SHA256SUMS --ignore-missing`. The
+  release workflow no longer uses the archived `actions-rs` actions, and every
+  action is pinned by commit.
 
 ## [v1.11.1] — 2026-11-21
 
