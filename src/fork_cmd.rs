@@ -32,7 +32,7 @@ use crate::cli::{
 };
 use crate::fork::{
     self, About, Relation, Source, SourceKind, Sources, SINCE_ADDRESS, SINCE_CONFIG,
-    SINCE_FIRMWARE_CATALOGUE, SINCE_HOSTNAME, SINCE_NTP, SINCE_THERMAL,
+    SINCE_FIRMWARE_CATALOGUE, SINCE_FIRMWARE_UNSTAGE, SINCE_HOSTNAME, SINCE_NTP, SINCE_THERMAL,
 };
 use crate::request::Request;
 
@@ -500,6 +500,73 @@ pub async fn install(
     Ok(0)
 }
 
+/// `tpi firmware unstage`: cancel a staged update (BMC-Firmware#124).
+///
+/// The board does the work (`POST opt=set&type=firmware_unstage`), under the
+/// same lock the installers hold, so this is refused with a 409 -- and says so
+/// in the daemon's words -- while an install is still writing and while the new
+/// firmware is being checked on its first boot. Idempotent: with nothing staged
+/// the board answers 200 and so does this.
+///
+/// The slots are read first, only to be able to name what was cancelled: the
+/// answer to the cancel is the slots after it, in which it is gone.
+pub async fn unstage(request: &Request, client: &Client, json: bool) -> Result<u8> {
+    gate(request, client, "firmware unstage", SINCE_FIRMWARE_UNSTAGE).await?;
+    let before = fork::slots(request, client).await?;
+    let after = fork::set(request, client, &[("type", "firmware_unstage")]).await?;
+
+    if json {
+        return emit_json(&after).map(|_| 0);
+    }
+
+    if after
+        .get("update_staged")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        bail!("the board answered, and still reports an update staged for the next boot");
+    }
+    println!("{}", unstage_summary(&before, &after));
+    Ok(0)
+}
+
+/// What a cancel did, in a sentence, from the slots before it and after.
+///
+/// Three outcomes, because the board has three states that call for this: an
+/// update armed for the next boot; a note left over from one that never was
+/// armed (a cut during staging, or during the first boot of the update --
+/// `update_staged` false, `staged` present); and nothing at all.
+fn unstage_summary(before: &serde_json::Value, after: &serde_json::Value) -> String {
+    let staged_name = |v: &serde_json::Value| {
+        let staged = v.get("staged")?;
+        ["version", "file"]
+            .iter()
+            .find_map(|key| staged.get(key).and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+    };
+    let running = after
+        .pointer("/running/version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let keeps = match &running {
+        Some(version) => format!("the next boot starts {version}, as now"),
+        None => "the next boot starts the running firmware".to_string(),
+    };
+
+    let armed = before
+        .get("update_staged")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    match (armed, staged_name(before)) {
+        (true, Some(name)) => format!("unstaged {name}; {keeps}"),
+        (true, None) => format!("unstaged the staged update; {keeps}"),
+        (false, Some(name)) => format!(
+            "removed the note of {name}, which was not armed; nothing changes at the next boot"
+        ),
+        (false, None) => "nothing is staged".to_string(),
+    }
+}
+
 /// Builds the query for installing one resolved candidate.
 ///
 /// Split out so the choice between the two endpoints is testable without a
@@ -536,7 +603,8 @@ fn install_request(
 
     // Both endpoints refuse when something is already staged, for the same
     // reason -- the updater writes into the volume nextboot points at -- and
-    // both take the same escape.
+    // both take the same escape, which means the same thing on both: cancel
+    // what is staged, then stage this (BMC-Firmware#128).
     if force {
         pairs.push(("force", "1".to_string()));
     }
@@ -2760,5 +2828,85 @@ mod switch_tests {
         .expect_err("that is not a document");
         assert!(format!("{error}").contains("is not a switch document"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod unstage_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn slots(update_staged: bool, staged: serde_json::Value) -> serde_json::Value {
+        json!({
+            "present": true,
+            "running": { "volume": "rootfs", "version": "v2.55.0" },
+            "update_staged": update_staged,
+            "staged": staged,
+        })
+    }
+
+    #[test]
+    fn an_armed_update_is_named_and_the_next_boot_is_said() {
+        let before = slots(
+            true,
+            json!({ "version": "v2.57.0", "source": "tpi-selfupdate" }),
+        );
+        let after = slots(false, json!(null));
+        assert_eq!(
+            unstage_summary(&before, &after),
+            "unstaged v2.57.0; the next boot starts v2.55.0, as now"
+        );
+    }
+
+    /// An image staged by something that left no note is still staged, and is
+    /// still cancelled; it just cannot be named.
+    #[test]
+    fn an_armed_update_with_no_note_is_still_cancelled() {
+        let before = slots(true, json!(null));
+        let after = slots(false, json!(null));
+        assert_eq!(
+            unstage_summary(&before, &after),
+            "unstaged the staged update; the next boot starts v2.55.0, as now"
+        );
+    }
+
+    /// An uploaded image whose file name follows no release naming has a file
+    /// and no version.
+    #[test]
+    fn an_upload_with_no_version_is_named_by_its_file() {
+        let before = slots(true, json!({ "file": "my-build.tpu", "source": "upload" }));
+        let after = slots(false, json!(null));
+        assert!(unstage_summary(&before, &after).starts_with("unstaged my-build.tpu;"));
+    }
+
+    /// The case behind BMC-Firmware#131: a power cut during the first boot of
+    /// an update left its note behind with nothing armed. Cancelling it removes
+    /// the note, and says that nothing was armed rather than claiming a cancel.
+    #[test]
+    fn a_note_that_was_never_armed_is_said_to_be_one() {
+        let before = slots(false, json!({ "version": "v2.57.0" }));
+        let after = slots(false, json!(null));
+        let text = unstage_summary(&before, &after);
+        assert!(text.contains("v2.57.0"), "{text}");
+        assert!(text.contains("was not armed"), "{text}");
+        assert!(!text.starts_with("unstaged"), "{text}");
+    }
+
+    #[test]
+    fn nothing_staged_is_not_an_error() {
+        let before = slots(false, json!(null));
+        let after = slots(false, json!(null));
+        assert_eq!(unstage_summary(&before, &after), "nothing is staged");
+    }
+
+    /// A board that reports no running version still gets a true sentence.
+    #[test]
+    fn an_unreadable_running_version_does_not_produce_a_blank() {
+        let before = slots(true, json!({ "version": "v2.57.0" }));
+        let after = json!({ "update_staged": false, "running": null, "staged": null });
+        assert_eq!(
+            unstage_summary(&before, &after),
+            "unstaged v2.57.0; the next boot starts the running firmware"
+        );
     }
 }

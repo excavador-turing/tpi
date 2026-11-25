@@ -15,6 +15,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Update safety. `tpi firmware unstage` is new, and `--force` on `install` now
+says what it does. Thank you to Daniel Steinhauf
+([@danste22](https://github.com/danste22)), who asked for the cancel in
+BMC-Firmware#124, and to Adrian Berger
+([@adberger](https://github.com/adberger)), whose simulation found that
+`install --force` was refused by the board it was offered by (#128).
+
+### Added
+
+- **`tpi firmware unstage` cancels a staged update**
+  (BMC-Firmware#124, Daniel Steinhauf). The next boot starts the firmware that
+  is running. It names what it cancelled, says so when nothing was staged (that
+  is not an error), and says when it removed the note of an update that was
+  never armed, which is what a power cut during the first boot of an update
+  leaves behind (BMC-Firmware#131). The board refuses with its own reason, and
+  nothing changes, while an install is still writing or while the new firmware
+  is being checked on its first boot. `--json` prints the slots after the
+  cancel. Needs bmcd 2.51.0 or newer on the board; an older one is told so
+  instead of answering "Invalid `type` parameter".
+
+### Changed
+
+- **`install --force` cancels what is staged, then installs**
+  (BMC-Firmware#128, Adrian Berger). The flag is unchanged; the board now does
+  the same on `firmware_install` as it already did for an uploaded image. If the
+  install fails nothing is staged, and `unstage` cancels without installing.
+
 ## [v2.0.1] — 2026-11-24
 
 A refactor, with no change in behaviour. Thank you,

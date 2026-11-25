@@ -46,6 +46,8 @@ use crate::request::Request;
 /// the rack. Being behind is the ordinary case, so it gets a real message
 /// rather than an error path.
 pub const SINCE_FIRMWARE_CATALOGUE: &str = "2.8.0";
+/// `type=firmware_unstage`: cancelling a staged update.
+pub const SINCE_FIRMWARE_UNSTAGE: &str = "2.51.0";
 pub const SINCE_THERMAL: &str = "2.5.0";
 /// The hostname and the time servers arrived together.
 pub const SINCE_HOSTNAME: &str = "2.13.0";
@@ -696,6 +698,14 @@ mod tests {
             "must name the command: {text}"
         );
         assert!(text.contains("upgrade"), "must say what to do: {text}");
+    }
+
+    /// `firmware unstage` needs the daemon that has `firmware_unstage`; an
+    /// older one would answer "Invalid `type` parameter".
+    #[test]
+    fn unstage_is_refused_by_a_board_that_does_not_have_it() {
+        assert!(require(&board("2.50.1"), "firmware unstage", SINCE_FIRMWARE_UNSTAGE).is_err());
+        assert!(require(&board("2.51.0"), "firmware unstage", SINCE_FIRMWARE_UNSTAGE).is_ok());
     }
 
     #[test]
