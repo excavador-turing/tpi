@@ -15,6 +15,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v2.1.0] — 2026-11-25
+
 Update safety. `tpi firmware unstage` is new, and `--force` on `install` now
 says what it does. Thank you to Daniel Steinhauf
 ([@danste22](https://github.com/danste22)), who asked for the cancel in
